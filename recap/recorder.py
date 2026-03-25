@@ -218,6 +218,22 @@ class Recorder:
         """Discover capture parameters, start captures, go."""
         self._has_video = self._config.capture_video
         self._has_audio = self._config.capture_audio
+        
+        # Measure achievable FPS on this system to prevent dropped frames
+        target_fps = self._config.fps
+        actual_fps = target_fps
+        if self._has_video:
+            from recap.video import VideoCapture
+            actual_fps = VideoCapture.measure_achievable_fps(
+                monitor_index=self._config.monitor,
+                window_handle=self._config.window_handle,
+                target_fps=target_fps,
+            )
+            if actual_fps < target_fps:
+                log.info(
+                    "FPS clamped from %d to %d based on system capability",
+                    target_fps, actual_fps,
+                )
 
         # ── resolve video target ────────────────────────────────────
         vid_kwargs: dict = {}
@@ -263,7 +279,7 @@ class Recorder:
             from recap.video import VideoCapture
 
             self._video_capture = VideoCapture(
-                self._video_relay, fps=self._config.fps, **vid_kwargs,
+                self._video_relay, fps=actual_fps, **vid_kwargs,
             )
             self._video_capture.start()
             if not self._video_capture.wait_ready(timeout=10):
@@ -295,7 +311,7 @@ class Recorder:
                 str(self._ffmpeg_info.path), ow,
                 "-f", "rawvideo", "-pixel_format", "bgra",
                 "-video_size", f"{width}x{height}",
-                "-framerate", str(self._config.fps),
+                "-framerate", str(actual_fps),
                 "-i", "pipe:0",
             ]
             if self._config.has_crop:
@@ -316,6 +332,8 @@ class Recorder:
                 stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            # Attach the relay to FFmpeg stdin immediately so video capture
+            # can write frames as soon as it's ready.
             self._video_relay.set_target(self._ffmpeg_proc.stdin)
 
         # ── start audio capture (WAV file) ──────────────────────────
@@ -331,6 +349,8 @@ class Recorder:
             self._audio_capture.start()
             if not self._audio_capture.wait_format_ready(timeout=10):
                 raise CaptureError("Audio capture did not become ready.")
+            if not self._audio_capture.wait_started(timeout=10):
+                raise CaptureError("Audio capture did not start in time.")
 
         # ── optional duration cap ───────────────────────────────────
         if self._config.duration is not None:

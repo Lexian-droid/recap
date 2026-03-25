@@ -57,6 +57,8 @@ class AudioCapture:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._format_event = threading.Event()
+        self._started_event = threading.Event()
+        self._started_at: Optional[float] = None
         self._sample_rate: int = 48000
         self._channels: int = 2
         self._bits_per_sample: int = 16
@@ -82,6 +84,9 @@ class AudioCapture:
         if self._running:
             return
         self._stop_event.clear()
+        self._format_event.clear()
+        self._started_event.clear()
+        self._started_at = None
         self._thread = threading.Thread(
             target=self._capture_loop, daemon=True, name="recap-audio"
         )
@@ -101,6 +106,15 @@ class AudioCapture:
     def wait_format_ready(self, timeout: float = 10.0) -> bool:
         """Block until the audio device format has been discovered."""
         return self._format_event.wait(timeout=timeout)
+
+    def wait_started(self, timeout: float = 10.0) -> bool:
+        """Block until the WASAPI client has started capturing."""
+        return self._started_event.wait(timeout=timeout)
+
+    @property
+    def started_at(self) -> Optional[float]:
+        """Monotonic timestamp when capture entered running state."""
+        return self._started_at
 
     # ------------------------------------------------------------------
     # Internal capture loop
@@ -418,11 +432,15 @@ class AudioCapture:
             )
 
             audio_client.Start()
+            self._started_at = time.perf_counter()
+            self._started_event.set()
             log.info("WASAPI loopback capture started")
 
             self._is_float = (self._bits_per_sample == 32)
             bytes_per_frame = self._channels * (self._bits_per_sample // 8)
-            sleep_interval = buffer_size / self._sample_rate / 2
+            # Poll more frequently to reduce clock drift relative to video.
+            # Target 10x per typical frame interval (e.g., ~1.6ms @ 30fps).
+            sleep_interval = min(0.002, buffer_size / self._sample_rate / 10)
 
             self._wav_file = wave.open(self._wav_path, 'wb')
             self._wav_file.setnchannels(self._channels)

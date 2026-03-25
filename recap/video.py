@@ -50,6 +50,79 @@ class VideoCapture:
         self._width: int = 0
         self._height: int = 0
         self._ready_event = threading.Event()
+        self._measured_fps: Optional[int] = None
+
+    @staticmethod
+    def measure_achievable_fps(
+        monitor_index: Optional[int] = None,
+        window_handle: Optional[int] = None,
+        target_fps: int = 60,
+    ) -> int:
+        """Pre-flight measurement of achievable frame rate (returns actual FPS).
+        
+        Samples frame capture overhead and returns the FPS this system can actually
+        achieve. Clamps to 15 FPS minimum and returns at least target_fps if
+        the system can achieve it.
+        """
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        
+        # Get dimensions of capture target
+        if window_handle is not None:
+            rect = ctypes.wintypes.RECT()
+            user32.GetClientRect(window_handle, ctypes.byref(rect))
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            hdc_source = user32.GetDC(window_handle)
+            use_printwindow = True
+        else:
+            from recap.discovery import list_monitors
+            monitors = list_monitors()
+            idx = monitor_index if monitor_index is not None else 0
+            if idx >= len(monitors):
+                return target_fps
+            mon = monitors[idx]
+            width, height = mon.width, mon.height
+            hdc_source = user32.GetDC(0)
+            use_printwindow = False
+        
+        try:
+            # Create memory DC and bitmap
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_source)
+            hbm = gdi32.CreateCompatibleBitmap(hdc_source, width, height)
+            old_bm = gdi32.SelectObject(hdc_mem, hbm)
+            
+            bmi = _make_bitmapinfo(width, height)
+            buf_size = width * height * 4
+            buf = (ctypes.c_char * buf_size)()
+            
+            # Measure 20 capture cycles
+            timings = []
+            for i in range(20):
+                t0 = time.perf_counter()
+                if use_printwindow:
+                    user32.PrintWindow(window_handle, hdc_mem, PW_RENDERFULLCONTENT)
+                else:
+                    gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_source,
+                                 monitors[idx].x, monitors[idx].y, SRCCOPY)
+                gdi32.GetDIBits(hdc_mem, hbm, 0, height, ctypes.byref(buf), 
+                               ctypes.byref(bmi), 0)
+                t1 = time.perf_counter()
+                timings.append(t1 - t0)
+            
+            # Calculate median cycle time
+            avg_time = sum(timings[5:]) / len(timings[5:])  # Skip first 5 warmup
+            achievable_fps = max(15, int(1.0 / avg_time))
+            
+            # Clamp to target if close
+            if achievable_fps >= target_fps * 0.9:
+                return target_fps
+            return achievable_fps
+        finally:
+            gdi32.SelectObject(hdc_mem, old_bm)
+            gdi32.DeleteObject(hbm)
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(0 if not use_printwindow else window_handle, hdc_source)
 
     @property
     def width(self) -> int:

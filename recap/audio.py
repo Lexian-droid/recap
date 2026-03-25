@@ -1,10 +1,10 @@
-"""recap – WASAPI loopback audio capture.
+"""recap – WASAPI loopback audio capture to WAV file.
 
 Captures system audio (loopback) using the Windows Audio Session API and
-streams raw PCM data to a pipe (or file) that FFmpeg can consume.
+writes PCM data directly to a temporary WAV file.
 
 The heavy lifting happens in a background thread so the main thread can
-coordinate video capture and the FFmpeg subprocess simultaneously.
+coordinate video capture separately.
 """
 
 from __future__ import annotations
@@ -15,8 +15,9 @@ import logging
 import struct
 import threading
 import time
-from io import RawIOBase
-from typing import BinaryIO, Optional
+import wave
+from pathlib import Path
+from typing import Optional
 
 from recap.exceptions import AudioCaptureError
 
@@ -35,15 +36,23 @@ WAVE_FORMAT_IEEE_FLOAT = 3
 WAVE_FORMAT_EXTENSIBLE = 0xFFFE
 
 
+def _float32_to_int16(data: bytes) -> bytes:
+    """Convert raw float32 LE PCM bytes to int16 LE PCM bytes."""
+    n = len(data) // 4
+    floats = struct.unpack_from(f'<{n}f', data)
+    return struct.pack(
+        f'<{n}h',
+        *(max(-32768, min(32767, int(f * 32767))) for f in floats),
+    )
+
+
 class AudioCapture:
-    """WASAPI loopback capture of system audio.
+    """WASAPI loopback capture of system audio to a WAV file."""
 
-    Writes raw PCM (signed 16-bit LE, stereo, 48 kHz) to the provided
-    writable binary stream.
-    """
-
-    def __init__(self, output_stream: BinaryIO) -> None:
-        self._stream = output_stream
+    def __init__(self, wav_path: str | Path) -> None:
+        self._wav_path = str(wav_path)
+        self._wav_file = None
+        self._is_float = False
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -411,8 +420,14 @@ class AudioCapture:
             audio_client.Start()
             log.info("WASAPI loopback capture started")
 
+            self._is_float = (self._bits_per_sample == 32)
             bytes_per_frame = self._channels * (self._bits_per_sample // 8)
             sleep_interval = buffer_size / self._sample_rate / 2
+
+            self._wav_file = wave.open(self._wav_path, 'wb')
+            self._wav_file.setnchannels(self._channels)
+            self._wav_file.setsampwidth(2)  # always write int16
+            self._wav_file.setframerate(self._sample_rate)
 
             try:
                 while not self._stop_event.is_set():
@@ -421,6 +436,9 @@ class AudioCapture:
                 # Final drain
                 self._drain_packets(capture_client, bytes_per_frame)
             finally:
+                if self._wav_file is not None:
+                    self._wav_file.close()
+                    self._wav_file = None
                 audio_client.Stop()
                 audio_client.Reset()
                 log.info("WASAPI loopback capture stopped")
@@ -430,6 +448,7 @@ class AudioCapture:
     def _drain_packets(self, capture_client, bytes_per_frame: int) -> None:
         """Read all available packets from the capture client."""
         AUDCLNT_BUFFERFLAGS_SILENT = 0x2
+        int16_frame_size = self._channels * 2
         while True:
             packet_size = capture_client.GetNextPacketSize()
             if packet_size == 0:
@@ -438,21 +457,13 @@ class AudioCapture:
             data_ptr, num_frames, flags, _, _ = capture_client.GetBuffer()
             if num_frames > 0:
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT:
-                    # Write silence
-                    silence = b"\x00" * (num_frames * bytes_per_frame)
-                    try:
-                        self._stream.write(silence)
-                    except (BrokenPipeError, OSError):
-                        self._stop_event.set()
-                        capture_client.ReleaseBuffer(num_frames)
-                        return
+                    silence = b"\x00" * (num_frames * int16_frame_size)
+                    self._wav_file.writeframes(silence)
                 else:
                     size = num_frames * bytes_per_frame
                     buf = (ctypes.c_char * size).from_address(data_ptr)
-                    try:
-                        self._stream.write(bytes(buf))
-                    except (BrokenPipeError, OSError):
-                        self._stop_event.set()
-                        capture_client.ReleaseBuffer(num_frames)
-                        return
+                    raw = bytes(buf)
+                    if self._is_float:
+                        raw = _float32_to_int16(raw)
+                    self._wav_file.writeframes(raw)
             capture_client.ReleaseBuffer(num_frames)

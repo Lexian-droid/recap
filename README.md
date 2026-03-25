@@ -19,6 +19,12 @@ pip install -e .
 
 FFmpeg must be available on PATH or specified via `--ffmpeg`.
 
+## Releasing
+
+GitHub Actions will publish the package to PyPI when you push a tag that starts with `v`, for example `v0.1.1`.
+
+Before the first release, configure PyPI Trusted Publishing for this repository and approve the `pypi` environment in GitHub.
+
 ## CLI Usage
 
 ```bash

@@ -119,6 +119,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Frames per second (default: 30).",
     )
     rec.add_argument(
+        "--crop-size",
+        type=_parse_crop_size,
+        default=None,
+        metavar="WIDTHxHEIGHT",
+        help=(
+            "Crop video to WIDTHxHEIGHT (example: 1280x720). "
+            "Applies to monitor and window capture."
+        ),
+    )
+    rec.add_argument(
+        "--crop-position",
+        default="middle",
+        metavar="POSITION",
+        help=(
+            "Crop anchor position: top-left, top-middle, top-right, "
+            "middle-left, middle, middle-right, bottom-left, "
+            "bottom-middle, bottom-right (default: middle)."
+        ),
+    )
+    rec.add_argument(
         "--ffmpeg",
         default=None,
         help="Path to the ffmpeg binary.",
@@ -262,6 +282,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
     from recap.exceptions import ConfigError, RecapError
     from recap.recorder import Recorder
 
+    crop_width = None
+    crop_height = None
+    if args.crop_size is not None:
+        crop_width, crop_height = args.crop_size
+
     try:
         config = RecordingConfig(
             output=args.output,
@@ -273,6 +298,9 @@ def _cmd_record(args: argparse.Namespace) -> int:
             video_only=args.video_only,
             duration=args.duration,
             fps=args.fps,
+            crop_width=crop_width,
+            crop_height=crop_height,
+            crop_position=args.crop_position,
             ffmpeg=args.ffmpeg,
             overwrite=args.overwrite,
             json_output=args.json_output,
@@ -340,6 +368,27 @@ def _print_error(msg: str, args: argparse.Namespace) -> None:
         print(json.dumps({"error": msg}), file=sys.stderr)
     else:
         print(f"Error: {msg}", file=sys.stderr)
+
+
+def _parse_crop_size(value: str) -> tuple[int, int]:
+    cleaned = value.strip().lower().replace(" ", "")
+    width_text, sep, height_text = cleaned.partition("x")
+    if sep != "x":
+        raise argparse.ArgumentTypeError(
+            "Crop size must use WIDTHxHEIGHT format (example: 1280x720)."
+        )
+    try:
+        width = int(width_text)
+        height = int(height_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Crop size width and height must be integers."
+        ) from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(
+            "Crop size width and height must be positive."
+        )
+    return width, height
 
 
 def _create_stop_event(

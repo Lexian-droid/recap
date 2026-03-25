@@ -10,6 +10,26 @@ from typing import Optional
 from recap.exceptions import ConfigError
 
 
+_CROP_POSITION_ALIASES: dict[str, str] = {
+    "top-left": "top-left",
+    "top-middle": "top-middle",
+    "top-center": "top-middle",
+    "top-right": "top-right",
+    "middle-left": "middle-left",
+    "center-left": "middle-left",
+    "middle": "middle",
+    "middle-middle": "middle",
+    "middle-center": "middle",
+    "center": "middle",
+    "middle-right": "middle-right",
+    "center-right": "middle-right",
+    "bottom-left": "bottom-left",
+    "bottom-middle": "bottom-middle",
+    "bottom-center": "bottom-middle",
+    "bottom-right": "bottom-right",
+}
+
+
 @dataclass
 class RecordingConfig:
     """Configuration for a recording session.
@@ -42,6 +62,12 @@ class RecordingConfig:
         Overwrite the output file if it already exists.
     json_output : bool
         Emit machine-readable JSON output from the CLI.
+    crop_width : int | None
+        Crop width in pixels. Must be provided together with ``crop_height``.
+    crop_height : int | None
+        Crop height in pixels. Must be provided together with ``crop_width``.
+    crop_position : str
+        Crop anchor position (for example ``top-left`` or ``middle``).
     """
 
     output: str | Path = "recording.mp4"
@@ -56,6 +82,9 @@ class RecordingConfig:
     ffmpeg: Optional[str] = None
     overwrite: bool = False
     json_output: bool = False
+    crop_width: Optional[int] = None
+    crop_height: Optional[int] = None
+    crop_position: str = "middle"
 
     def __post_init__(self) -> None:
         self.output = Path(self.output)
@@ -118,6 +147,30 @@ class RecordingConfig:
                 "Use --overwrite to replace it."
             )
 
+        # Crop validation
+        crop_dim_count = sum(
+            value is not None for value in (self.crop_width, self.crop_height)
+        )
+        if crop_dim_count == 1:
+            raise ConfigError(
+                "Crop size requires both width and height (for example "
+                "--crop-size 1280x720)."
+            )
+        if self.crop_width is not None and self.crop_height is not None:
+            if self.crop_width <= 0 or self.crop_height <= 0:
+                raise ConfigError("Crop width and height must be positive.")
+            if not self.capture_video:
+                raise ConfigError("Crop options require video capture.")
+
+        normalized_position = _normalize_crop_position(self.crop_position)
+        if normalized_position is None:
+            allowed = ", ".join(sorted(set(_CROP_POSITION_ALIASES.values())))
+            raise ConfigError(
+                "Invalid crop position. Expected one of: "
+                f"{allowed}."
+            )
+        self.crop_position = normalized_position
+
     # ------------------------------------------------------------------
     # Derived helpers
     # ------------------------------------------------------------------
@@ -140,3 +193,51 @@ class RecordingConfig:
             or self.window_title is not None
             or self.window_handle is not None
         )
+
+    @property
+    def has_crop(self) -> bool:
+        """Whether a crop region is configured."""
+        return self.crop_width is not None and self.crop_height is not None
+
+    def build_crop_filter(self, source_width: int, source_height: int) -> str:
+        """Build an FFmpeg ``crop=`` filter string for this config."""
+        if not self.has_crop:
+            raise ConfigError("Crop filter requested but crop is not configured.")
+
+        crop_width = int(self.crop_width)
+        crop_height = int(self.crop_height)
+        if crop_width > source_width or crop_height > source_height:
+            raise ConfigError(
+                "Crop size "
+                f"{crop_width}x{crop_height} exceeds capture size "
+                f"{source_width}x{source_height}."
+            )
+
+        vertical, horizontal = _split_crop_position(self.crop_position)
+        if vertical == "top":
+            y = 0
+        elif vertical == "middle":
+            y = (source_height - crop_height) // 2
+        else:
+            y = source_height - crop_height
+
+        if horizontal == "left":
+            x = 0
+        elif horizontal == "middle":
+            x = (source_width - crop_width) // 2
+        else:
+            x = source_width - crop_width
+
+        return f"crop={crop_width}:{crop_height}:{x}:{y}"
+
+
+def _normalize_crop_position(value: str) -> Optional[str]:
+    key = value.strip().lower().replace("_", "-")
+    return _CROP_POSITION_ALIASES.get(key)
+
+
+def _split_crop_position(position: str) -> tuple[str, str]:
+    if position == "middle":
+        return "middle", "middle"
+    vertical, horizontal = position.split("-", maxsplit=1)
+    return vertical, horizontal

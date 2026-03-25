@@ -297,6 +297,13 @@ class Recorder:
                 "-video_size", f"{width}x{height}",
                 "-framerate", str(self._config.fps),
                 "-i", "pipe:0",
+            ]
+            if self._config.has_crop:
+                crop_filter = self._config.build_crop_filter(width, height)
+                cmd += ["-vf", crop_filter]
+                log.info("Crop filter: %s", crop_filter)
+
+            cmd += [
                 "-c:v", venc, *(venc_opts or []),
                 "-pix_fmt", "yuv420p", "-an",
                 video_output,

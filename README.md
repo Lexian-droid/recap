@@ -45,12 +45,28 @@ recap record --window-title "Notepad" --output notepad.mp4
 # Record video only
 recap record --video-only --output silent.mp4
 
+# Record a 1280x720 crop from the top-left of the selected source
+recap record --crop-size 1280x720 --crop-position top-left --output cropped.mp4
+
+# Record a centered 1280x720 crop from a specific window
+recap record --window-title "Notepad" --crop-size 1280x720 --crop-position middle --output notepad-cropped.mp4
+
 # Record audio only
 recap record --audio-only --output audio.wav
 
 # Record for 30 seconds
 recap record --duration 30 --output clip.mp4
 ```
+
+### Crop positions
+
+`--crop-position` supports:
+
+- `top-left`, `top-middle`, `top-right`
+- `middle-left`, `middle`, `middle-right`
+- `bottom-left`, `bottom-middle`, `bottom-right`
+
+Center aliases are also accepted (`center`, `top-center`, `middle-center`, etc.).
 
 ## Library Usage
 

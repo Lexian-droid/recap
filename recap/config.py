@@ -29,6 +29,8 @@ _CROP_POSITION_ALIASES: dict[str, str] = {
     "bottom-right": "bottom-right",
 }
 
+_WINDOW_CAPTURE_MODES = {"printwindow", "screen"}
+
 
 @dataclass
 class RecordingConfig:
@@ -68,6 +70,9 @@ class RecordingConfig:
         Crop height in pixels. Must be provided together with ``crop_width``.
     crop_position : str
         Crop anchor position (for example ``top-left`` or ``middle``).
+    window_capture_mode : str
+        Window capture backend. ``printwindow`` (default) uses PrintWindow,
+        while ``screen`` captures the window region from the desktop.
     """
 
     output: str | Path = "recording.mp4"
@@ -85,6 +90,7 @@ class RecordingConfig:
     crop_width: Optional[int] = None
     crop_height: Optional[int] = None
     crop_position: str = "middle"
+    window_capture_mode: str = "printwindow"
 
     def __post_init__(self) -> None:
         self.output = Path(self.output)
@@ -170,6 +176,14 @@ class RecordingConfig:
                 f"{allowed}."
             )
         self.crop_position = normalized_position
+
+        self.window_capture_mode = self.window_capture_mode.strip().lower()
+        if self.window_capture_mode not in _WINDOW_CAPTURE_MODES:
+            allowed = ", ".join(sorted(_WINDOW_CAPTURE_MODES))
+            raise ConfigError(
+                "Invalid window capture mode. Expected one of: "
+                f"{allowed}."
+            )
 
     # ------------------------------------------------------------------
     # Derived helpers

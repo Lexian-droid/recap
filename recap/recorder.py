@@ -224,6 +224,7 @@ class Recorder:
         if self._has_video:
             if self._config.window_handle is not None:
                 vid_kwargs["window_handle"] = self._config.window_handle
+                vid_kwargs["window_capture_mode"] = self._config.window_capture_mode
             elif self._config.window_title is not None:
                 from recap.discovery import find_window_by_title
 
@@ -234,6 +235,7 @@ class Recorder:
                         f"'{self._config.window_title}'"
                     )
                 vid_kwargs["window_handle"] = win.handle
+                vid_kwargs["window_capture_mode"] = self._config.window_capture_mode
             else:
                 vid_kwargs["monitor_index"] = (
                     self._config.monitor

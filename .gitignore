@@ -1,2 +1,7 @@
-*__pycache__/
 !.gitignore
+*__pycache__/
+dist/
+build/
+*.egg-info/
+*.pyc
+recording.mp4

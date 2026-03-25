@@ -39,13 +39,11 @@ class VideoCapture:
         fps: int = 30,
         monitor_index: Optional[int] = None,
         window_handle: Optional[int] = None,
-        window_capture_mode: str = "printwindow",
     ) -> None:
         self._stream = output_stream
         self._fps = fps
         self._monitor_index = monitor_index
         self._window_handle = window_handle
-        self._window_capture_mode = window_capture_mode
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -90,10 +88,7 @@ class VideoCapture:
     def _capture_loop(self) -> None:
         try:
             if self._window_handle is not None:
-                if self._window_capture_mode == "screen":
-                    self._capture_window_from_screen(self._window_handle)
-                else:
-                    self._capture_window(self._window_handle)
+                self._capture_window(self._window_handle)
             else:
                 self._capture_monitor()
         except Exception as exc:
@@ -255,89 +250,6 @@ class VideoCapture:
             gdi32.DeleteDC(hdc_mem)
             user32.ReleaseDC(hwnd, hdc_window)
 
-    def _capture_window_from_screen(self, hwnd: int) -> None:
-        user32 = ctypes.windll.user32
-        gdi32 = ctypes.windll.gdi32
-
-        if not user32.IsWindow(hwnd):
-            raise VideoCaptureError(f"HWND {hwnd:#x} is not a valid window.")
-
-        _, _, width, height = _get_client_rect_on_screen(hwnd)
-        if width <= 0 or height <= 0:
-            raise VideoCaptureError(
-                f"Window has no client area ({width}x{height}). It may be minimised."
-            )
-
-        self._width = width
-        self._height = height
-        log.info(
-            "Window capture (screen region): HWND=%#x %dx%d",
-            hwnd,
-            self._width,
-            self._height,
-        )
-        self._ready_event.set()
-
-        hdc_screen = user32.GetDC(0)
-        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
-        hbm = gdi32.CreateCompatibleBitmap(hdc_screen, self._width, self._height)
-        old_bm = gdi32.SelectObject(hdc_mem, hbm)
-
-        bmi = _make_bitmapinfo(self._width, self._height)
-        buf_size = self._width * self._height * 4
-        buf = (ctypes.c_char * buf_size)()
-        frame_interval = 1.0 / self._fps
-        next_frame: Optional[float] = None
-
-        if hasattr(self._stream, 'wait_ready'):
-            if not self._stream.wait_ready(timeout=30):
-                raise VideoCaptureError("Timed out waiting for video pipe.")
-
-        try:
-            while not self._stop_event.is_set():
-                if not user32.IsWindow(hwnd):
-                    break
-
-                cur_left, cur_top, cur_width, cur_height = _get_client_rect_on_screen(hwnd)
-                if cur_width <= 0 or cur_height <= 0:
-                    break
-
-                if cur_width != self._width or cur_height != self._height:
-                    raise VideoCaptureError(
-                        "Window client size changed during capture. "
-                        "Keep the window size fixed while recording."
-                    )
-
-                gdi32.BitBlt(
-                    hdc_mem, 0, 0,
-                    self._width, self._height,
-                    hdc_screen,
-                    cur_left, cur_top,
-                    SRCCOPY,
-                )
-                gdi32.GetDIBits(
-                    hdc_mem, hbm, 0, self._height,
-                    ctypes.byref(buf), ctypes.byref(bmi), 0,
-                )
-
-                try:
-                    self._stream.write(bytes(buf))
-                except (BrokenPipeError, OSError):
-                    break
-
-                now = time.perf_counter()
-                if next_frame is None:
-                    next_frame = now
-                next_frame += frame_interval
-                remaining = next_frame - now
-                if remaining > 0:
-                    time.sleep(remaining)
-        finally:
-            gdi32.SelectObject(hdc_mem, old_bm)
-            gdi32.DeleteObject(hbm)
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc_screen)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -369,18 +281,3 @@ def _make_bitmapinfo(width: int, height: int) -> _BITMAPINFOHEADER:
     bmi.biCompression = BI_RGB
     bmi.biSizeImage = width * height * 4
     return bmi
-
-
-def _get_client_rect_on_screen(hwnd: int) -> tuple[int, int, int, int]:
-    user32 = ctypes.windll.user32
-    rect = ctypes.wintypes.RECT()
-    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
-        raise VideoCaptureError("Failed to query window client rect.")
-
-    top_left = ctypes.wintypes.POINT(rect.left, rect.top)
-    if not user32.ClientToScreen(hwnd, ctypes.byref(top_left)):
-        raise VideoCaptureError("Failed to map window client area to screen coordinates.")
-
-    width = rect.right - rect.left
-    height = rect.bottom - rect.top
-    return top_left.x, top_left.y, width, height

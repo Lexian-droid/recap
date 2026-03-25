@@ -42,9 +42,6 @@ recap record --output recording.mp4
 # Record a specific window
 recap record --window-title "Notepad" --output notepad.mp4
 
-# Work around frozen background browser captures
-recap record --window-title "Chrome" --window-capture-mode screen --output chrome-live.mp4
-
 # Record video only
 recap record --video-only --output silent.mp4
 
@@ -70,15 +67,6 @@ recap record --duration 30 --output clip.mp4
 - `bottom-left`, `bottom-middle`, `bottom-right`
 
 Center aliases are also accepted (`center`, `top-center`, `middle-center`, etc.).
-
-### Window capture mode
-
-When capturing a window, `--window-capture-mode` supports:
-
-- `printwindow` (default): captures via PrintWindow (good for many apps)
-- `screen`: captures the window's client area from the desktop compositor (useful when some apps, such as browsers, appear frozen while unfocused)
-
-Note: `screen` mode captures what is currently visible on the desktop for that region. If another window covers the target window, the covering content will be captured.
 
 ## Library Usage
 

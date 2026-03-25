@@ -92,16 +92,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Capture the window with this HWND (decimal or hex).",
     )
     rec.add_argument(
-        "--window-capture-mode",
-        default="printwindow",
-        metavar="MODE",
-        help=(
-            "Window capture backend: printwindow (default) or screen. "
-            "Use 'screen' if certain apps (for example browsers) freeze "
-            "when unfocused."
-        ),
-    )
-    rec.add_argument(
         "--no-audio",
         action="store_true",
         help="Do not capture audio.",
@@ -311,7 +301,6 @@ def _cmd_record(args: argparse.Namespace) -> int:
             crop_width=crop_width,
             crop_height=crop_height,
             crop_position=args.crop_position,
-            window_capture_mode=args.window_capture_mode,
             ffmpeg=args.ffmpeg,
             overwrite=args.overwrite,
             json_output=args.json_output,

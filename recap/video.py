@@ -129,11 +129,18 @@ class VideoCapture:
         buf_size = self._width * self._height * 4
         buf = (ctypes.c_char * buf_size)()
         frame_interval = 1.0 / self._fps
+        next_frame: Optional[float] = None
+
+        # Wait for the pipe to connect before capturing the first frame.
+        # This ensures video PTS 0 contains fresh screen content from the
+        # same real-time instant as audio PTS 0 — not a frame that was
+        # captured ~200 ms earlier while FFmpeg was still starting up.
+        if hasattr(self._stream, 'wait_ready'):
+            if not self._stream.wait_ready(timeout=30):
+                raise VideoCaptureError("Timed out waiting for video pipe.")
 
         try:
             while not self._stop_event.is_set():
-                t0 = time.perf_counter()
-
                 gdi32.BitBlt(
                     hdc_mem, 0, 0,
                     self._width, self._height,
@@ -151,8 +158,14 @@ class VideoCapture:
                 except (BrokenPipeError, OSError):
                     break
 
-                elapsed = time.perf_counter() - t0
-                remaining = frame_interval - elapsed
+                # Deadline-based timing: advance next_frame by exactly
+                # one frame interval so any overshoot is recovered on
+                # the next iteration.
+                now = time.perf_counter()
+                if next_frame is None:
+                    next_frame = now
+                next_frame += frame_interval
+                remaining = next_frame - now
                 if remaining > 0:
                     time.sleep(remaining)
         finally:
@@ -204,11 +217,15 @@ class VideoCapture:
         buf_size = self._width * self._height * 4
         buf = (ctypes.c_char * buf_size)()
         frame_interval = 1.0 / self._fps
+        next_frame: Optional[float] = None
+
+        # Wait for the pipe to connect before the first frame capture.
+        if hasattr(self._stream, 'wait_ready'):
+            if not self._stream.wait_ready(timeout=30):
+                raise VideoCaptureError("Timed out waiting for video pipe.")
 
         try:
             while not self._stop_event.is_set():
-                t0 = time.perf_counter()
-
                 user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT)
                 gdi32.GetDIBits(
                     hdc_mem, hbm, 0, self._height,
@@ -220,8 +237,11 @@ class VideoCapture:
                 except (BrokenPipeError, OSError):
                     break
 
-                elapsed = time.perf_counter() - t0
-                remaining = frame_interval - elapsed
+                now = time.perf_counter()
+                if next_frame is None:
+                    next_frame = now
+                next_frame += frame_interval
+                remaining = next_frame - now
                 if remaining > 0:
                     time.sleep(remaining)
         finally:

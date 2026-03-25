@@ -11,8 +11,10 @@ All modes use a **single FFmpeg process**.
   can read them concurrently without deadlocking on sequential probing.
 - Video-only / audio-only: the single stream goes through stdin.
 
-Audio data is buffered until the FFmpeg pipe connects, then trimmed
-to keep only the portion matching the video start time for lip-sync.
+Both inputs use natural frame-count timestamps so FFmpeg can reliably
+interleave them.  Pre-connection audio is discarded so both streams
+start from the same instant.  The video capture loop uses deadline-
+based timing to hold the declared frame rate accurately.
 """
 
 from __future__ import annotations
@@ -385,41 +387,24 @@ class Recorder:
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
 
-        # FFmpeg opens each -i sequentially: video first, audio
-        # second.  We record when the video pipe connects so the
-        # audio relay can keep exactly enough buffered audio to
-        # cover the gap, making both streams start from the same
-        # wall-clock instant.
-        video_t0: list[float] = [0.0]   # set by vthread
-
-        def _wire_video(handle, relay):
+        # FFmpeg opens each -i sequentially.  Each ConnectNamedPipe
+        # unblocks as soon as FFmpeg reaches that input.
+        # Pre-connection audio is discarded (not flushed) because
+        # wallclock timestamps would compress the burst into a
+        # near-zero PTS span, distorting playback.
+        def _wire(handle, relay, label):
             _connect_named_pipe(handle)
-            video_t0[0] = time.monotonic()
             pw = _PipeWriter(handle)
             self._pipe_writers.append(pw)
             relay.set_target(pw)
-            log.debug("Video pipe connected")
-
-        # Audio byte rate for buffer-trim calculation.
-        _bps = 4 if afmt == "f32le" else 2
-        _audio_byte_rate = asr * ach * _bps
-
-        def _wire_audio(handle, relay):
-            _connect_named_pipe(handle)
-            gap = time.monotonic() - video_t0[0]
-            keep = int(gap * _audio_byte_rate)
-            pw = _PipeWriter(handle)
-            self._pipe_writers.append(pw)
-            relay.set_target(pw, keep_bytes=keep)
-            log.debug("Audio pipe connected (gap=%.3fs, kept %d bytes)",
-                      gap, keep)
+            log.debug("%s pipe connected", label)
 
         threading.Thread(
-            target=_wire_video, args=(vh, video_relay),
+            target=_wire, args=(vh, video_relay, "Video"),
             daemon=True, name="recap-vpipe",
         ).start()
         threading.Thread(
-            target=_wire_audio, args=(ah, audio_relay),
+            target=_wire, args=(ah, audio_relay, "Audio"),
             daemon=True, name="recap-apipe",
         ).start()
 
@@ -542,11 +527,11 @@ class _DataRelay:
 
     *buffered=True* (audio):
         Writes are stored in memory until the target becomes available.
-        On connection the buffer is trimmed to keep only the audio that
-        matches the video start time (see *keep_bytes* in ``set_target``).
-        This also prevents the WASAPI capture thread from stalling,
-        which would cause its internal ring-buffer to overflow and drop
-        samples.
+        The buffer is **discarded** on connection so only fresh audio
+        (with correct wallclock timestamps from FFmpeg) enters the
+        output.  This also prevents the WASAPI capture thread from
+        stalling, which would cause its internal ring-buffer to
+        overflow and drop samples.
     """
 
     def __init__(self, *, buffered: bool = False) -> None:
@@ -556,38 +541,28 @@ class _DataRelay:
         self._buf: list[bytes] = []
         self._lock = threading.Lock()
 
-    def set_target(self, target, *, keep_bytes: int = 0) -> None:
+    def wait_ready(self, timeout: float = 30.0) -> bool:
+        """Block until a target has been attached (pipe connected).
+
+        Used by the video capture loop to avoid writing a stale first
+        frame: the loop waits here before the first BitBlt so that
+        PTS 0 is current screen content rather than content captured
+        during FFmpeg's startup delay.
+        """
+        return self._ready.wait(timeout=timeout)
+
+    def set_target(self, target) -> None:
         """Attach the real target.
 
-        In buffered mode *keep_bytes* controls how much pre-connection
-        audio to flush so it aligns with the video start time.  Any
-        audio older than that is discarded.
-
-        *keep_bytes=0* (default) discards the entire buffer — used in
-        audio-only mode where there is no video to sync with.
+        In buffered mode the pre-connection buffer is **discarded**.
+        With ``-use_wallclock_as_timestamps`` on the FFmpeg input,
+        only data written *after* this call gets meaningful PTS
+        values, so flushing old audio would create a burst with
+        compressed timestamps.
         """
         if self._buffered:
             with self._lock:
                 self._target = target
-                if keep_bytes > 0:
-                    # Trim front of buffer, keeping only the last
-                    # *keep_bytes* to match the video start.
-                    total = sum(len(c) for c in self._buf)
-                    discard = max(total - keep_bytes, 0)
-                    while self._buf and discard > 0:
-                        chunk = self._buf[0]
-                        if len(chunk) <= discard:
-                            discard -= len(chunk)
-                            self._buf.pop(0)
-                        else:
-                            self._buf[0] = chunk[discard:]
-                            discard = 0
-                    # Flush kept audio to the target.
-                    for chunk in self._buf:
-                        try:
-                            target.write(chunk)
-                        except (BrokenPipeError, OSError):
-                            break
                 self._buf.clear()
         else:
             self._target = target

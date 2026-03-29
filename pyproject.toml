@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recap-capture"
-version = "0.2.2"
+version = "0.3.0"
 description = "Headless screen and audio capture library and CLI for Windows"
 readme = "README.md"
 license = {text = "MIT"}

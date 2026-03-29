@@ -16,7 +16,7 @@ from __future__ import annotations
 import ctypes
 import sys
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 # Enable DPI awareness so Win32 APIs return physical pixel coordinates ------
 if sys.platform == "win32":

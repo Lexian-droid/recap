@@ -49,8 +49,13 @@ def _float32_to_int16(data: bytes) -> bytes:
 class AudioCapture:
     """WASAPI loopback capture of system audio to a WAV file."""
 
-    def __init__(self, wav_path: str | Path) -> None:
+    def __init__(
+        self,
+        wav_path: str | Path,
+        process_id: Optional[int] = None,
+    ) -> None:
         self._wav_path = str(wav_path)
+        self._process_id = process_id
         self._wav_file = None
         self._is_float = False
         self._running = False
@@ -382,21 +387,31 @@ class AudioCapture:
             # Thread already has a COM apartment; that's fine.
             pass
         try:
+            # GetMixFormat is NOT implemented on process-loopback IAudioClients.
+            # Always obtain the mix format from the default render endpoint first.
             enumerator = comtypes.CoCreateInstance(
                 CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator
             )
             device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
-
-            # Activate IAudioClient
-            audio_client_ptr = device.Activate(
+            fmt_client_ptr = device.Activate(
                 ctypes.byref(IID_IAudioClient), CLSCTX_ALL, None
             )
-            audio_client = ctypes.cast(
-                audio_client_ptr, ctypes.POINTER(IAudioClient)
+            fmt_client = ctypes.cast(
+                fmt_client_ptr, ctypes.POINTER(IAudioClient)
             )
+            mix_fmt_ptr = fmt_client.GetMixFormat()
 
-            # Get mix format
-            mix_fmt_ptr = audio_client.GetMixFormat()
+            if self._process_id is not None:
+                log.info(
+                    "Process-specific audio loopback for PID %d",
+                    self._process_id,
+                )
+                audio_client = self._activate_process_loopback(
+                    self._process_id, IAudioClient, IID_IAudioClient
+                )
+            else:
+                audio_client = fmt_client
+
             mix_fmt = ctypes.cast(mix_fmt_ptr, ctypes.POINTER(WAVEFORMATEX)).contents
             self._sample_rate = mix_fmt.nSamplesPerSec
             self._channels = mix_fmt.nChannels
@@ -485,3 +500,223 @@ class AudioCapture:
                         raw = _float32_to_int16(raw)
                     self._wav_file.writeframes(raw)
             capture_client.ReleaseBuffer(num_frames)
+
+    # ------------------------------------------------------------------
+    # Process-specific loopback activation
+    # ------------------------------------------------------------------
+
+    def _activate_process_loopback(self, process_id: int, IAudioClient, IID_IAudioClient):
+        """Activate a process-loopback IAudioClient for *process_id*.
+
+        Uses ``ActivateAudioInterfaceAsync`` with
+        ``AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`` to capture audio
+        only from the given process and its child processes.
+
+        Returns a ``ctypes.POINTER(IAudioClient)`` ready for
+        ``GetMixFormat`` / ``Initialize``.
+
+        Requires Windows 10 version 2004 (build 19041) or later.
+        """
+        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback"
+
+        # ---------- structures ----------
+
+        class _LoopbackParams(ctypes.Structure):
+            _fields_ = [
+                ("TargetProcessId", ctypes.wintypes.DWORD),
+                ("ProcessLoopbackMode", ctypes.c_uint),
+            ]
+
+        class _ActivationParams(ctypes.Structure):
+            _fields_ = [
+                ("ActivationType", ctypes.c_uint),
+                ("ProcessLoopbackParams", _LoopbackParams),
+            ]
+
+        class _BLOB(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("pBlobData", ctypes.c_void_p),
+            ]
+
+        class _PROPVARIANT(ctypes.Structure):
+            _fields_ = [
+                ("vt", ctypes.c_ushort),
+                ("reserved1", ctypes.c_ushort),
+                ("reserved2", ctypes.c_ushort),
+                ("reserved3", ctypes.c_ushort),
+                ("blob", _BLOB),
+            ]
+
+        act_params = _ActivationParams(
+            ActivationType=1,  # AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+            ProcessLoopbackParams=_LoopbackParams(
+                TargetProcessId=process_id,
+                ProcessLoopbackMode=0,  # PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+            ),
+        )
+        prop_var = _PROPVARIANT(
+            vt=0x0041,  # VT_BLOB
+            blob=_BLOB(
+                cbSize=ctypes.sizeof(act_params),
+                pBlobData=ctypes.addressof(act_params),
+            ),
+        )
+
+        # ---------- minimal vtable COM object for completion handler ----------
+
+        done_event = threading.Event()
+        result: dict = {"hr": -1, "unk": None}
+        ptr_size = ctypes.sizeof(ctypes.c_void_p)
+
+        # Function types for the vtable
+        _QI_t = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        _AR_t = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+        _RE_t = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+        _AC_t = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT, ctypes.c_void_p, ctypes.c_void_p
+        )
+        # IActivateAudioInterfaceAsyncOperation::GetActivateResult (vtable slot 3)
+        _GAR_t = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.HRESULT),
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+
+        def _qi(this, riid, ppv):
+            ppv[0] = this
+            return 0  # S_OK
+
+        def _ar(this):
+            return 1
+
+        def _re(this):
+            return 1
+
+        def _ac(this, op_ptr):
+            try:
+                if not op_ptr:
+                    result["hr"] = -1
+                    return 0
+                # Read vtable pointer from the async-operation COM object
+                vtbl = ctypes.c_void_p.from_address(op_ptr).value
+                if not vtbl:
+                    result["hr"] = -1
+                    return 0
+                # GetActivateResult is at vtable slot 3
+                fn_ptr = ctypes.c_void_p.from_address(
+                    vtbl + 3 * ptr_size
+                ).value
+                get_result = _GAR_t(fn_ptr)
+                hr_out = ctypes.HRESULT(0)
+                unk_out = ctypes.c_void_p(0)
+                get_result(op_ptr, ctypes.byref(hr_out), ctypes.byref(unk_out))
+                result["hr"] = hr_out.value
+                result["unk"] = unk_out.value
+            except Exception as exc:
+                log.error(
+                    "Process loopback ActivateCompleted error: %s",
+                    exc,
+                    exc_info=True,
+                )
+                result["hr"] = -1
+            finally:
+                done_event.set()
+            return 0  # S_OK
+
+        class _VTBL(ctypes.Structure):
+            _fields_ = [
+                ("qi", _QI_t),
+                ("ar", _AR_t),
+                ("re", _RE_t),
+                ("ac", _AC_t),
+            ]
+
+        class _OBJ(ctypes.Structure):
+            _fields_ = [("vtbl", ctypes.POINTER(_VTBL))]
+
+        vtbl_inst = _VTBL(_QI_t(_qi), _AR_t(_ar), _RE_t(_re), _AC_t(_ac))
+        obj_inst = _OBJ(ctypes.pointer(vtbl_inst))
+
+        # Keep all objects alive until the async completion fires
+        _keep_alive = (act_params, prop_var, vtbl_inst, obj_inst)
+
+        # ---------- call ActivateAudioInterfaceAsync ----------
+
+        mmdevapi = ctypes.windll.mmdevapi
+        mmdevapi.ActivateAudioInterfaceAsync.restype = ctypes.HRESULT
+        mmdevapi.ActivateAudioInterfaceAsync.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_void_p,                     # REFIID
+            ctypes.c_void_p,                     # PROPVARIANT*
+            ctypes.c_void_p,                     # IActivateAudioInterfaceCompletionHandler*
+            ctypes.POINTER(ctypes.c_void_p),     # IActivateAudioInterfaceAsyncOperation**
+        ]
+
+        async_op = ctypes.c_void_p(0)
+        hr = mmdevapi.ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            ctypes.addressof(IID_IAudioClient),
+            ctypes.addressof(prop_var),
+            ctypes.c_void_p(ctypes.addressof(obj_inst)),
+            ctypes.byref(async_op),
+        )
+        if hr != 0:
+            raise AudioCaptureError(
+                f"ActivateAudioInterfaceAsync failed: {hr & 0xFFFFFFFF:#010x}. "
+                "Process-specific audio capture requires Windows 10 "
+                "version 2004 (build 19041) or later."
+            )
+
+        if not done_event.wait(timeout=15.0):
+            raise AudioCaptureError(
+                "Process audio loopback activation timed out."
+            )
+
+        # Silence the "unused variable" lint warning while keeping objects alive
+        _ = _keep_alive
+
+        if result["hr"] is not None and result["hr"] < 0:
+            raise AudioCaptureError(
+                f"GetActivateResult failed: {result['hr'] & 0xFFFFFFFF:#010x}"
+            )
+        if not result["unk"]:
+            raise AudioCaptureError(
+                "Process audio activation returned a null interface pointer."
+            )
+
+        # ---------- QueryInterface IUnknown* -> IAudioClient* ----------
+
+        _QI_unk_t = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        unk_raw = result["unk"]
+        vtbl_base = ctypes.c_void_p.from_address(unk_raw).value
+        qi_fn = ctypes.c_void_p.from_address(vtbl_base).value
+        qi = _QI_unk_t(qi_fn)
+
+        audio_client_raw = ctypes.c_void_p(0)
+        hr_qi = qi(
+            unk_raw,
+            ctypes.addressof(IID_IAudioClient),
+            ctypes.byref(audio_client_raw),
+        )
+        if hr_qi != 0:
+            raise AudioCaptureError(
+                f"QueryInterface(IAudioClient) failed: {hr_qi & 0xFFFFFFFF:#010x}"
+            )
+        if not audio_client_raw.value:
+            raise AudioCaptureError(
+                "QueryInterface(IAudioClient) returned a null pointer."
+            )
+
+        return ctypes.cast(audio_client_raw, ctypes.POINTER(IAudioClient))

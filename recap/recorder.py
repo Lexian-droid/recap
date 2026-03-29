@@ -236,10 +236,22 @@ class Recorder:
                 )
 
         # ── resolve video target ────────────────────────────────────
+        _window_pid: Optional[int] = None
         vid_kwargs: dict = {}
         if self._has_video:
             if self._config.window_handle is not None:
                 vid_kwargs["window_handle"] = self._config.window_handle
+                if self._has_audio:
+                    from recap.discovery import find_window_by_handle
+                    _win = find_window_by_handle(self._config.window_handle)
+                    if _win is not None:
+                        _window_pid = _win.pid
+                    else:
+                        log.warning(
+                            "Could not resolve PID for HWND %d; "
+                            "falling back to desktop audio loopback.",
+                            self._config.window_handle,
+                        )
             elif self._config.window_title is not None:
                 from recap.discovery import find_window_by_title
 
@@ -250,6 +262,8 @@ class Recorder:
                         f"'{self._config.window_title}'"
                     )
                 vid_kwargs["window_handle"] = win.handle
+                if self._has_audio:
+                    _window_pid = win.pid
             else:
                 vid_kwargs["monitor_index"] = (
                     self._config.monitor
@@ -345,7 +359,7 @@ class Recorder:
                 if self._temp_audio_path is not None
                 else str(self._config.output)
             )
-            self._audio_capture = AudioCapture(audio_path)
+            self._audio_capture = AudioCapture(audio_path, process_id=_window_pid)
             self._audio_capture.start()
             if not self._audio_capture.wait_format_ready(timeout=10):
                 raise CaptureError("Audio capture did not become ready.")

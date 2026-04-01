@@ -166,8 +166,50 @@ class AudioCapture:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+        # Wait for FFmpeg to initialize and begin writing audio data.
+        # The WAV header (44 bytes) is written once FFmpeg has connected
+        # to the audio source and is actively capturing.
+        wav = Path(self._wav_path)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self._ffmpeg_proc.poll() is not None:
+                raise AudioCaptureError(
+                    f"FFmpeg audio process exited immediately "
+                    f"(code {self._ffmpeg_proc.returncode})"
+                )
+            try:
+                if wav.exists() and wav.stat().st_size >= 44:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        else:
+            if self._ffmpeg_proc.poll() is None:
+                self._ffmpeg_proc.kill()
+            raise AudioCaptureError(
+                "FFmpeg did not start writing audio in time"
+            )
+
         self._started_at = time.perf_counter()
         self._started_event.set()
+        log.info("Linux audio capture started")
+
+        # Keep the capture thread alive until stop is requested.
+        self._stop_event.wait()
+
+        # Gracefully stop FFmpeg and wait for it to finalize the WAV file.
+        if self._ffmpeg_proc.poll() is None:
+            try:
+                self._ffmpeg_proc.send_signal(signal.SIGINT)
+                self._ffmpeg_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._ffmpeg_proc.kill()
+                self._ffmpeg_proc.wait(timeout=5)
+            except (OSError, ProcessLookupError):
+                pass
+
+        log.info("Linux audio capture stopped")
         log.info("Linux audio capture started")
 
         # Wait for stop signal

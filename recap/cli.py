@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recap",
-        description="Headless screen and audio capture for Windows.",
+        description="Cross-platform headless screen and audio capture.",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -187,6 +187,7 @@ def _cmd_version(args: argparse.Namespace) -> int:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from recap.ffmpeg import validate_environment
+    from recap.platforms import platform_name
 
     diag = validate_environment(getattr(args, "ffmpeg", None))
 
@@ -197,13 +198,23 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     py = diag["python"]
     print(f"Python:   {py['version'].split()[0]}  ({py['executable']})")
     print(f"Platform: {py['platform']}")
-    print(f"Windows:  {'yes' if diag['windows'] else 'NO'}")
+    print(f"OS:       {platform_name()}")
 
     if diag["ffmpeg"]:
         ff = diag["ffmpeg"]
         print(f"FFmpeg:   {ff['version']}  ({ff['path']})")
     else:
         print("FFmpeg:   NOT FOUND")
+
+    # Platform-specific info
+    import os as _os
+    if sys.platform.startswith("linux"):
+        display = _os.environ.get("DISPLAY", "")
+        wayland = _os.environ.get("WAYLAND_DISPLAY", "")
+        if display:
+            print(f"Display:  X11 ({display})")
+        elif wayland:
+            print(f"Display:  Wayland ({wayland})")
 
     if diag["issues"]:
         print()
@@ -395,9 +406,16 @@ def _create_stop_event(
     stop_event: threading.Event,
     recorder,
 ) -> None:
-    """Create a Win32 named event ``recap_stop_{pid}`` that external
-    processes can signal to trigger a graceful stop.
+    """Create a platform-specific stop mechanism.
+
+    On Windows, creates a named Win32 event ``recap_stop_{pid}`` that
+    external processes can signal to trigger a graceful stop.
+    On other platforms this is a no-op (use SIGINT/SIGTERM instead).
     """
+    if sys.platform != "win32":
+        return
+
+    import ctypes
     import os
 
     pid = os.getpid()
@@ -420,9 +438,6 @@ def _create_stop_event(
         t.start()
     except Exception:
         pass
-
-
-import ctypes  # noqa: E402 – needed by _create_stop_event
 
 
 if __name__ == "__main__":

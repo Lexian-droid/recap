@@ -1,4 +1,6 @@
-"""recap – headless screen and audio capture for Windows.
+"""recap – cross-platform headless screen and audio capture.
+
+Supported platforms: Windows, macOS, and Linux.
 
 Public API
 ----------
@@ -16,7 +18,7 @@ from __future__ import annotations
 import ctypes
 import sys
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 
 # Enable DPI awareness so Win32 APIs return physical pixel coordinates ------
 if sys.platform == "win32":
@@ -41,6 +43,7 @@ from recap.exceptions import (
     ConfigError,
     FFmpegError,
     FFmpegNotFoundError,
+    PlatformError,
     RecapError,
     VideoCaptureError,
 )
@@ -73,4 +76,5 @@ __all__ = [
     "AudioCaptureError",
     "VideoCaptureError",
     "ConfigError",
+    "PlatformError",
 ]

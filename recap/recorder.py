@@ -6,9 +6,9 @@ subprocess.  This is the main entry-point for the library API.
 Architecture
 ------------
 Video is captured and encoded to a temporary file via FFmpeg (stdin
-pipe).  Audio is captured to a temporary WAV file using WASAPI
-loopback.  After recording stops, a final FFmpeg mux step combines
-the two into the output file.
+pipe).  Audio is captured to a temporary WAV file (WASAPI on Windows,
+FFmpeg avfoundation/pulse on macOS/Linux).  After recording stops, a
+final FFmpeg mux step combines the two into the output file.
 
 Video-only and audio-only modes are also supported.
 """
@@ -20,6 +20,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -31,6 +32,7 @@ from recap.exceptions import (
     RecapError,
 )
 from recap.ffmpeg import FFmpegInfo, find_ffmpeg
+from recap.platforms import subprocess_flags as _subprocess_flags
 
 log = logging.getLogger(__name__)
 
@@ -344,7 +346,7 @@ class Recorder:
                 cmd,
                 stdin=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                **_subprocess_flags(),
             )
             # Attach the relay to FFmpeg stdin immediately so video capture
             # can write frames as soon as it's ready.
@@ -396,7 +398,7 @@ class Recorder:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            **_subprocess_flags(),
         )
         if result.returncode != 0:
             raise FFmpegError(f"FFmpeg mux failed:\n{result.stderr}")
@@ -418,7 +420,7 @@ class Recorder:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            **_subprocess_flags(),
         )
         if result.returncode != 0:
             raise FFmpegError(
@@ -496,15 +498,28 @@ def _pick_video_encoder(
 ) -> tuple[str, list[str]]:
     """Return ``(encoder_name, extra_flags)`` for the best H.264 encoder.
 
-    Tries GPU-accelerated encoders first (NVENC → QSV → AMF),
-    falling back to libx264 with ultrafast preset.  The result is
-    cached so subsequent recordings skip the probe.
+    Tries GPU-accelerated encoders first, falling back to libx264 with
+    ultrafast preset.  Encoder candidates are platform-specific:
+
+    * **Windows**: NVENC → QSV → AMF → libx264
+    * **macOS**: VideoToolbox → NVENC → libx264
+    * **Linux**: NVENC → VAAPI → QSV → libx264
+
+    The result is cached so subsequent recordings skip the probe.
     """
     global _hw_encoder_cache, _hw_encoder_tested
 
     if not _hw_encoder_tested:
         _hw_encoder_tested = True
-        for enc in ("h264_nvenc", "h264_qsv", "h264_amf"):
+
+        if sys.platform == "darwin":
+            candidates = ["h264_videotoolbox", "h264_nvenc"]
+        elif sys.platform.startswith("linux"):
+            candidates = ["h264_nvenc", "h264_vaapi", "h264_qsv"]
+        else:
+            candidates = ["h264_nvenc", "h264_qsv", "h264_amf"]
+
+        for enc in candidates:
             try:
                 r = subprocess.run(
                     [
@@ -515,7 +530,7 @@ def _pick_video_encoder(
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    **_subprocess_flags(),
                 )
                 if r.returncode == 0:
                     _hw_encoder_cache = enc
@@ -529,4 +544,8 @@ def _pick_video_encoder(
         return ("h264_qsv", ["-preset", "veryfast"])
     if _hw_encoder_cache == "h264_amf":
         return ("h264_amf", [])
+    if _hw_encoder_cache == "h264_videotoolbox":
+        return ("h264_videotoolbox", ["-realtime", "1"])
+    if _hw_encoder_cache == "h264_vaapi":
+        return ("h264_vaapi", [])
     return ("libx264", ["-preset", "ultrafast"])

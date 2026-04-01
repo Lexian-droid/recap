@@ -10,14 +10,17 @@ coordinate video capture separately.
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
 import logging
 import struct
+import sys
 import threading
 import time
 import wave
 from pathlib import Path
 from typing import Optional
+
+if sys.platform == "win32":
+    import ctypes.wintypes
 
 from recap.exceptions import AudioCaptureError
 
@@ -734,3 +737,12 @@ try:
         AudioCapture = NativeAudioCapture
 except ImportError:
     pass
+
+# ---------------------------------------------------------------------------
+# Cross-platform dispatch for non-Windows platforms
+# ---------------------------------------------------------------------------
+
+if sys.platform == "darwin":
+    from recap.platforms.macos.audio import AudioCapture  # noqa: F811
+elif sys.platform.startswith("linux"):
+    from recap.platforms.linux.audio import AudioCapture  # noqa: F811

@@ -1,24 +1,53 @@
 # recap
 
-Headless screen and audio capture library and CLI for Windows.
+Cross-platform headless screen and audio capture library and CLI.
 
 ## Features
 
-- Record an entire monitor (GDI BitBlt) or a single window (PrintWindow)
-- Record system audio via WASAPI loopback
-- Per-application audio capture via WASAPI process loopback (Windows 10 2004+)
+- **Cross-platform**: Windows, macOS, and Linux
+- Record an entire monitor or a single window
+- Record system audio (loopback capture)
+- Per-application audio capture (Windows only via WASAPI process loopback)
 - Video-only, audio-only, or audio+video modes
 - Crop support with configurable size and anchor position
 - CLI tool (`recap`) and importable Python library
-- Rust native backend (PyO3) for performance-critical capture paths, with automatic fallback to pure-Python
+- Rust native backend (PyO3) for Windows, with automatic fallback to pure-Python
 - Uses FFmpeg for encoding/muxing only
+
+## Platform Support
+
+| Feature | Windows | macOS | Linux |
+|---|---|---|---|
+| Monitor capture | ✓ GDI BitBlt | ✓ CoreGraphics | ✓ X11 XGetImage |
+| Window capture | ✓ PrintWindow | ✓ CGWindowListCreateImage | ✓ X11 XGetImage |
+| System audio | ✓ WASAPI loopback | ⚠ Requires BlackHole/Soundflower | ✓ PulseAudio monitor |
+| Per-app audio | ✓ WASAPI process loopback | ✗ Not supported | ✗ Not supported |
+| Rust backend | ✓ | — | — |
+| HW encoding | NVENC / QSV / AMF | VideoToolbox / NVENC | NVENC / VAAPI / QSV |
+
+### macOS Notes
+
+- **Screen Recording permission** must be granted in System Settings → Privacy & Security → Screen Recording.
+- **System audio capture** requires a virtual audio loopback device such as [BlackHole](https://github.com/ExistentialAudio/BlackHole). Install BlackHole, then set it as your system output (or use a Multi-Output Device to hear audio simultaneously). Recap auto-detects BlackHole/Soundflower when available.
+- Per-application audio capture is not supported; system-wide audio is captured instead.
+
+### Linux Notes
+
+- Video capture requires **X11** (XWayland is acceptable). Native Wayland capture is not yet supported. If running under Wayland, ensure `DISPLAY` is set for XWayland.
+- Audio capture uses **PulseAudio/PipeWire** loopback (`default.monitor`). Ensure `pactl` is available (`pulseaudio-utils` or `pipewire-pulse`).
+- Per-application audio capture is not directly supported; system-wide audio is captured instead.
 
 ## Requirements
 
-- **Windows 10** version 2004 (build 19041) or later for per-application audio capture
 - **Python** 3.10–3.13
 - **FFmpeg** on PATH or specified via `--ffmpeg`
-- **Rust toolchain** (only if building from source)
+- **Rust toolchain** (only if building from source on Windows)
+
+### Platform-specific requirements
+
+- **Windows**: Windows 10 version 2004+ for per-app audio capture
+- **macOS**: macOS 11+ recommended; Screen Recording permission required
+- **Linux**: X11 or XWayland; PulseAudio or PipeWire; `xrandr` for multi-monitor detection
 
 ## Installation
 
@@ -30,55 +59,62 @@ pip install recap-capture
 
 ### From source (editable)
 
-Requires [maturin](https://www.maturin.rs/) and the Rust toolchain:
+Requires [maturin](https://www.maturin.rs/) and the Rust toolchain (for the Windows native backend):
 
 ```bash
 pip install maturin
 git clone https://github.com/Lexian-droid/recap.git
 cd recap
-maturin develop --release
+maturin develop --release   # builds native backend (Windows only)
 pip install -e .
 ```
 
+On macOS/Linux, skip the `maturin develop` step if you don't need the Rust backend — the pure-Python implementations are used automatically.
+
 ## Architecture
 
-The project has a hybrid Python/Rust structure:
+The project has a hybrid Python/Rust structure with a platform abstraction layer:
 
 ```
 recap/              Python package (CLI, config, orchestration)
+  __init__.py       Public API and version
   _native.py        Bridge to Rust — sets NATIVE_AVAILABLE flag
   cli.py            CLI entry point
   config.py         RecordingConfig dataclass
   recorder.py       Orchestrates capture threads + FFmpeg
-  video.py          Python GDI video capture (fallback)
-  audio.py          Python WASAPI audio capture (fallback)
-  discovery.py      Python monitor/window/device enumeration (fallback)
+  video.py          Platform-dispatching video capture
+  audio.py          Platform-dispatching audio capture
+  discovery.py      Platform-dispatching monitor/window/device enumeration
   ffmpeg.py         FFmpeg discovery and process wiring
   exceptions.py     Exception hierarchy
+  platforms/        Platform abstraction layer
+    __init__.py     Platform detection utilities
+    macos/          macOS backends (CoreGraphics + FFmpeg avfoundation)
+    linux/          Linux backends (X11 + FFmpeg pulse/alsa)
 
-rust_core/          Rust native backend (PyO3/maturin)
+rust_core/          Rust native backend (PyO3/maturin, Windows only)
   src/lib.rs        PyO3 module registration
   src/video.rs      GDI BitBlt / PrintWindow video capture
   src/audio.rs      WASAPI loopback + process loopback audio capture
   src/discovery.rs  Monitor/window/audio device enumeration
 ```
 
-When the Rust extension (`recap._rust_core`) is available, `VideoCapture`, `AudioCapture`, and all discovery functions are automatically replaced with their native implementations. If the extension is missing (e.g. no wheel for your platform), everything falls back to the pure-Python backends transparently.
+### Platform dispatch
+
+The `video.py`, `audio.py`, and `discovery.py` modules contain the Windows implementation at the top level. On macOS or Linux, platform-specific implementations are imported from `recap/platforms/` and replace the module-level names. This means the public API (`from recap import VideoCapture`) works identically regardless of platform.
+
+On Windows, the Rust extension (`recap._rust_core`) can further replace the Python backends with native implementations for maximum performance.
 
 ### Window-specific recording
 
 When a window is targeted via `--window-title` or `--window-handle`:
 
-- **Video** is captured using `PrintWindow` on that window's HWND
-- **Audio** is captured using WASAPI process loopback, isolating only audio from that window's process tree
-
-If the target process cannot be resolved, audio falls back to desktop-wide loopback with a warning.
+- **Video** is captured using the platform's native window capture API
+- **Audio** on Windows uses WASAPI process loopback to isolate audio from that process. On macOS/Linux, system-wide audio is captured instead (with a warning).
 
 ## Releasing
 
-GitHub Actions will publish the package to PyPI when you push a tag that starts with `v` (e.g. `v0.4.1`). Wheels are built on `windows-latest` for Python 3.10–3.13 using `maturin-action`.
-
-Before the first release, configure PyPI Trusted Publishing for this repository and approve the `pypi` environment in GitHub.
+GitHub Actions will publish the package to PyPI when you push a tag that starts with `v` (e.g. `v0.5.0`). Wheels are built for Python 3.10–3.13. The Rust native backend is compiled for Windows; macOS and Linux use pure-Python backends.
 
 ## CLI Usage
 
@@ -94,7 +130,7 @@ recap devices
 # Record primary monitor with audio
 recap record --output recording.mp4
 
-# Record a specific window (video + window-specific audio)
+# Record a specific window (video + window-specific audio on Windows)
 recap record --window-title "Notepad" --output notepad.mp4
 
 # Record video only
@@ -147,7 +183,7 @@ config = RecordingConfig(
 )
 recorder = Recorder(config)
 recorder.start()
-# captures only the Discord window's video and audio
+# captures the Discord window's video (and per-app audio on Windows)
 recorder.stop()
 recorder.wait()
 ```

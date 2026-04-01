@@ -31,3 +31,7 @@ class ConfigError(RecapError):
 
 class EnvironmentError(RecapError):
     """The runtime environment is missing required components."""
+
+
+class PlatformError(RecapError):
+    """A feature is not supported on the current platform."""

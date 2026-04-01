@@ -8,9 +8,12 @@ the pure-Python ctypes implementation is used.
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
+import sys
 from dataclasses import dataclass
 from typing import Optional
+
+if sys.platform == "win32":
+    import ctypes.wintypes
 
 
 # ---------------------------------------------------------------------------
@@ -447,3 +450,24 @@ try:
 
 except ImportError:
     pass
+
+# ---------------------------------------------------------------------------
+# Cross-platform dispatch for non-Windows platforms
+# ---------------------------------------------------------------------------
+
+if sys.platform == "darwin":
+    from recap.platforms.macos.discovery import (  # noqa: F811
+        list_monitors,
+        list_windows,
+        list_audio_devices,
+        find_window_by_title,
+        find_window_by_handle,
+    )
+elif sys.platform.startswith("linux"):
+    from recap.platforms.linux.discovery import (  # noqa: F811
+        list_monitors,
+        list_windows,
+        list_audio_devices,
+        find_window_by_title,
+        find_window_by_handle,
+    )

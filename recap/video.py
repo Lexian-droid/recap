@@ -13,11 +13,14 @@ The capture runs on a background thread.
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
 import logging
+import sys
 import threading
 import time
 from typing import BinaryIO, Optional
+
+if sys.platform == "win32":
+    import ctypes.wintypes
 
 from recap.exceptions import VideoCaptureError
 
@@ -368,3 +371,12 @@ try:
         VideoCapture = NativeVideoCapture
 except ImportError:
     pass
+
+# ---------------------------------------------------------------------------
+# Cross-platform dispatch for non-Windows platforms
+# ---------------------------------------------------------------------------
+
+if sys.platform == "darwin":
+    from recap.platforms.macos.video import VideoCapture  # noqa: F811
+elif sys.platform.startswith("linux"):
+    from recap.platforms.linux.video import VideoCapture  # noqa: F811

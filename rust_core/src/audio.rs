@@ -6,15 +6,26 @@ use std::time::Instant;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+    eConsole, eRender, ActivateAudioInterfaceAsync,
+    IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+    IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl,
     MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
     COINIT_MULTITHREADED,
+    StructuredStorage::PROPVARIANT,
 };
+use windows::Win32::System::Variant::VT_BLOB;
 
 const REFTIMES_PER_SEC: i64 = 10_000_000;
 
@@ -187,12 +198,12 @@ fn audio_capture_thread(state: Arc<AudioState>, wav_path: String, process_id: Op
 fn audio_capture_impl(
     state: &AudioState,
     wav_path: &str,
-    _process_id: Option<u32>,
+    process_id: Option<u32>,
 ) -> Result<(), String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-        let result = audio_capture_core(state, wav_path);
+        let result = audio_capture_core(state, wav_path, process_id);
 
         CoUninitialize();
 
@@ -200,9 +211,128 @@ fn audio_capture_impl(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Process-specific loopback activation via ActivateAudioInterfaceAsync
+// ---------------------------------------------------------------------------
+
+/// COM completion handler for ActivateAudioInterfaceAsync.
+#[windows::core::implement(IActivateAudioInterfaceCompletionHandler)]
+struct CompletionHandler {
+    result: Arc<Mutex<Option<windows::core::Result<IAudioClient>>>>,
+    event: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for CompletionHandler_Impl {
+    fn ActivateCompleted(
+        &self,
+        activateoperation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows::core::Result<()> {
+        let client_result = unsafe {
+            let mut hr = windows::core::HRESULT(0);
+            let mut unk = None;
+            let op = activateoperation.ok()?;
+            op.GetActivateResult(&mut hr, &mut unk)?;
+            if hr.is_err() {
+                Err(windows::core::Error::from(hr))
+            } else {
+                unk.ok_or_else(|| {
+                    windows::core::Error::from(windows::core::HRESULT(-1i32 as u32 as i32))
+                })
+                .and_then(|u: windows::core::IUnknown| u.cast::<IAudioClient>())
+            }
+        };
+        *self.result.lock().unwrap() = Some(client_result);
+        let (lock, cvar) = &*self.event;
+        let mut done = lock.lock().unwrap();
+        *done = true;
+        cvar.notify_all();
+        Ok(())
+    }
+}
+
+unsafe fn activate_process_loopback(process_id: u32) -> Result<IAudioClient, String> {
+    let device_id = "VAD\\Process_Loopback";
+    let device_id_wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut act_params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: process_id,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+
+    // Build a PROPVARIANT with VT_BLOB pointing at our activation params.
+    // We use ManuallyDrop to prevent PropVariantClear from trying to free
+    // our stack-allocated act_params pointer via CoTaskMemFree.
+    let prop_var = std::mem::ManuallyDrop::new({
+        let mut pv = PROPVARIANT::default();
+        let vt_ptr: *mut u16 = &mut pv as *mut _ as *mut u16;
+        *vt_ptr = VT_BLOB.0 as u16;
+        // PROPVARIANT layout: 2(vt) + 6(reserved) + union(16 bytes on x64)
+        // For VT_BLOB, the union is a BLOB { cbSize: u32, pBlobData: *mut u8 }
+        let blob_ptr = (&mut pv as *mut PROPVARIANT as *mut u8).add(8);
+        let cb_size_ptr = blob_ptr as *mut u32;
+        *cb_size_ptr = std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32;
+        let data_ptr = blob_ptr.add(std::mem::size_of::<usize>()) as *mut *mut u8;
+        *data_ptr = &mut act_params as *mut _ as *mut u8;
+        pv
+    });
+
+    let result: Arc<Mutex<Option<windows::core::Result<IAudioClient>>>> =
+        Arc::new(Mutex::new(None));
+    let event = Arc::new((Mutex::new(false), Condvar::new()));
+
+    let handler: IActivateAudioInterfaceCompletionHandler = CompletionHandler {
+        result: Arc::clone(&result),
+        event: Arc::clone(&event),
+    }
+    .into();
+
+    let _async_op = ActivateAudioInterfaceAsync(
+        PCWSTR(device_id_wide.as_ptr()),
+        &IAudioClient::IID,
+        Some(&*prop_var),
+        &handler,
+    )
+    .map_err(|e| {
+        format!(
+            "ActivateAudioInterfaceAsync failed: {}. \
+             Process-specific audio capture requires Windows 10 \
+             version 2004 (build 19041) or later.",
+            e
+        )
+    })?;
+
+    // Wait for completion
+    let (lock, cvar) = &*event;
+    let guard = lock.lock().unwrap();
+    let wait_result = cvar
+        .wait_timeout_while(guard, std::time::Duration::from_secs(15), |done| !*done)
+        .unwrap();
+    if !*wait_result.0 {
+        return Err("Process audio loopback activation timed out.".into());
+    }
+
+    let client_result = result
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "Completion handler did not provide a result.".to_string())?;
+
+    client_result.map_err(|e| format!("Process loopback activation failed: {}", e))
+}
+
+// ---------------------------------------------------------------------------
+// Core capture loop (shared by system-wide and process-specific)
+// ---------------------------------------------------------------------------
+
 unsafe fn audio_capture_core(
     state: &AudioState,
     wav_path: &str,
+    process_id: Option<u32>,
 ) -> Result<(), String> {
     let enumerator: IMMDeviceEnumerator =
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -212,13 +342,22 @@ unsafe fn audio_capture_core(
         .GetDefaultAudioEndpoint(eRender, eConsole)
         .map_err(|e| format!("GetDefaultAudioEndpoint: {}", e))?;
 
-    let audio_client: IAudioClient = device
+    // Always get the mix format from the default endpoint first.
+    // Process-loopback IAudioClients do NOT support GetMixFormat.
+    let fmt_client: IAudioClient = device
         .Activate(CLSCTX_ALL, None)
         .map_err(|e| format!("Activate(IAudioClient): {}", e))?;
 
-    let mix_fmt_ptr = audio_client
+    let mix_fmt_ptr = fmt_client
         .GetMixFormat()
         .map_err(|e| format!("GetMixFormat: {}", e))?;
+
+    // Select the audio client: process-specific or default
+    let audio_client: IAudioClient = if let Some(pid) = process_id {
+        activate_process_loopback(pid)?
+    } else {
+        fmt_client
+    };
     let mix_fmt = &*mix_fmt_ptr;
 
     let sample_rate = mix_fmt.nSamplesPerSec;

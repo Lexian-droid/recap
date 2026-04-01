@@ -361,7 +361,11 @@ class Recorder:
                 if self._temp_audio_path is not None
                 else str(self._config.output)
             )
-            self._audio_capture = AudioCapture(audio_path, process_id=_window_pid)
+            self._audio_capture = AudioCapture(
+                audio_path,
+                process_id=_window_pid,
+                ffmpeg_path=self._ffmpeg_info.path if self._ffmpeg_info else None,
+            )
             self._audio_capture.start()
             if not self._audio_capture.wait_format_ready(timeout=10):
                 raise CaptureError("Audio capture did not become ready.")

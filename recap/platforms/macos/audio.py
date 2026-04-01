@@ -40,9 +40,11 @@ class AudioCapture:
         self,
         wav_path: str | Path,
         process_id: Optional[int] = None,
+        ffmpeg_path: Optional[str | Path] = None,
     ) -> None:
         self._wav_path = str(wav_path)
         self._process_id = process_id
+        self._ffmpeg_override = str(ffmpeg_path) if ffmpeg_path else None
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -126,7 +128,7 @@ class AudioCapture:
                 "Capturing from the default audio input device instead."
             )
 
-        ffmpeg_info = find_ffmpeg()
+        ffmpeg_info = find_ffmpeg(self._ffmpeg_override)
         ffmpeg_path = str(ffmpeg_info.path)
 
         # Detect best audio device

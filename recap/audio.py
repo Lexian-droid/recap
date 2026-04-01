@@ -56,6 +56,7 @@ class AudioCapture:
         self,
         wav_path: str | Path,
         process_id: Optional[int] = None,
+        ffmpeg_path: Optional[str | Path] = None,
     ) -> None:
         self._wav_path = str(wav_path)
         self._process_id = process_id

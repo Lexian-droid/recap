@@ -354,3 +354,17 @@ def _make_bitmapinfo(width: int, height: int) -> _BITMAPINFOHEADER:
     bmi.biCompression = BI_RGB
     bmi.biSizeImage = width * height * 4
     return bmi
+
+
+# ---------------------------------------------------------------------------
+# Native backend delegation
+# ---------------------------------------------------------------------------
+
+try:
+    from recap._native import NATIVE_AVAILABLE
+    if NATIVE_AVAILABLE:
+        from recap._native import NativeVideoCapture
+        _PythonVideoCapture = VideoCapture
+        VideoCapture = NativeVideoCapture
+except ImportError:
+    pass

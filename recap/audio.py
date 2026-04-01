@@ -720,3 +720,17 @@ class AudioCapture:
             )
 
         return ctypes.cast(audio_client_raw, ctypes.POINTER(IAudioClient))
+
+
+# ---------------------------------------------------------------------------
+# Native backend delegation
+# ---------------------------------------------------------------------------
+
+try:
+    from recap._native import NATIVE_AVAILABLE
+    if NATIVE_AVAILABLE:
+        from recap._native import NativeAudioCapture
+        _PythonAudioCapture = AudioCapture
+        AudioCapture = NativeAudioCapture
+except ImportError:
+    pass

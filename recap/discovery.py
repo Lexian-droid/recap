@@ -1,7 +1,8 @@
 """recap – monitor, window, and audio device discovery.
 
-All discovery functions use Windows-native APIs via ctypes so there is no
-hard dependency on pywin32 or comtypes at import time.
+When the Rust native backend is available, all discovery functions
+delegate to the compiled extension for better performance.  Otherwise
+the pure-Python ctypes implementation is used.
 """
 
 from __future__ import annotations
@@ -393,3 +394,56 @@ def _enumerate_wasapi_devices() -> list[AudioDeviceInfo]:
         return devices
     finally:
         comtypes.CoUninitialize()
+
+
+# ---------------------------------------------------------------------------
+# Native backend delegation
+# ---------------------------------------------------------------------------
+
+try:
+    from recap._native import NATIVE_AVAILABLE
+    if NATIVE_AVAILABLE:
+        from recap._native import (
+            native_list_monitors as _native_list_monitors,
+            native_list_windows as _native_list_windows,
+            native_find_window_by_title as _native_find_window_by_title,
+            native_find_window_by_handle as _native_find_window_by_handle,
+            native_list_audio_devices as _native_list_audio_devices,
+        )
+
+        _py_list_monitors = list_monitors
+        _py_list_windows = list_windows
+        _py_find_window_by_title = find_window_by_title
+        _py_find_window_by_handle = find_window_by_handle
+        _py_list_audio_devices = list_audio_devices
+
+        def list_monitors() -> list[MonitorInfo]:
+            """Enumerate monitors via the native Rust backend."""
+            return [MonitorInfo(**m.as_dict()) for m in _native_list_monitors()]
+
+        def list_windows(*, include_hidden: bool = False) -> list[WindowInfo]:
+            """Enumerate windows via the native Rust backend."""
+            return [
+                WindowInfo(**w.as_dict())
+                for w in _native_list_windows(include_hidden=include_hidden)
+            ]
+
+        def find_window_by_title(substring: str) -> Optional[WindowInfo]:
+            """Find window by title via the native Rust backend."""
+            result = _native_find_window_by_title(substring)
+            return WindowInfo(**result.as_dict()) if result is not None else None
+
+        def find_window_by_handle(hwnd: int) -> Optional[WindowInfo]:
+            """Find window by handle via the native Rust backend."""
+            result = _native_find_window_by_handle(hwnd)
+            return WindowInfo(**result.as_dict()) if result is not None else None
+
+        def list_audio_devices() -> list[AudioDeviceInfo]:
+            """Enumerate audio devices via the native Rust backend."""
+            return [
+                AudioDeviceInfo(**d.as_dict())
+                for d in _native_list_audio_devices()
+            ]
+
+except ImportError:
+    pass

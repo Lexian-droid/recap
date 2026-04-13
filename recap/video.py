@@ -99,9 +99,9 @@ class VideoCapture:
             buf_size = width * height * 4
             buf = (ctypes.c_char * buf_size)()
             
-            # Measure 20 capture cycles
+            # Measure 10 capture cycles
             timings = []
-            for i in range(20):
+            for i in range(10):
                 t0 = time.perf_counter()
                 if use_printwindow:
                     user32.PrintWindow(window_handle, hdc_mem, PW_RENDERFULLCONTENT)
@@ -114,7 +114,7 @@ class VideoCapture:
                 timings.append(t1 - t0)
             
             # Calculate median cycle time
-            avg_time = sum(timings[5:]) / len(timings[5:])  # Skip first 5 warmup
+            avg_time = sum(timings[3:]) / len(timings[3:])  # Skip first 3 warmup
             achievable_fps = max(15, int(1.0 / avg_time))
             
             # Clamp to target if close

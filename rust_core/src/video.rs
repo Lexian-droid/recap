@@ -454,8 +454,8 @@ fn measure_fps_impl(
         let buf_size = (width * height * 4) as usize;
         let mut buf: Vec<u8> = vec![0u8; buf_size];
 
-        let mut timings: Vec<f64> = Vec::with_capacity(20);
-        for _ in 0..20 {
+        let mut timings: Vec<f64> = Vec::with_capacity(10);
+        for _ in 0..10 {
             let t0 = Instant::now();
             if use_printwindow {
                 let _ = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT);
@@ -494,9 +494,9 @@ fn measure_fps_impl(
         };
         ReleaseDC(release_hwnd, hdc_source);
 
-        // Average of timings after skipping first 5 warmup
+        // Average of timings after skipping first 3 warmup
         let avg_time: f64 =
-            timings[5..].iter().sum::<f64>() / (timings.len() - 5) as f64;
+            timings[3..].iter().sum::<f64>() / (timings.len() - 3) as f64;
         let achievable_fps = std::cmp::max(15, (1.0 / avg_time) as i32);
 
         if achievable_fps as f64 >= target_fps as f64 * 0.9 {

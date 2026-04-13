@@ -40,6 +40,14 @@ log = logging.getLogger(__name__)
 _hw_encoder_cache: Optional[str] = None
 _hw_encoder_tested = False
 
+# Disk cache for encoder probe (survives process restarts).
+_ENCODER_CACHE_DIR = Path(
+    os.environ.get("LOCALAPPDATA", "")
+    or os.environ.get("XDG_CACHE_HOME", "")
+    or Path.home() / ".cache"
+) / "recap"
+_ENCODER_CACHE_FILE = _ENCODER_CACHE_DIR / "encoder_cache.txt"
+
 
 # ====================================================================
 # Public API
@@ -221,7 +229,20 @@ class Recorder:
         self._has_video = self._config.capture_video
         self._has_audio = self._config.capture_audio
         
-        # Measure achievable FPS on this system to prevent dropped frames
+        # Kick off encoder probe early (may already be cached on disk).
+        encoder_future: Optional[threading.Thread] = None
+        encoder_result: list = []  # mutable container for thread result
+        if self._has_video:
+            def _probe_encoder():
+                encoder_result.append(
+                    _pick_video_encoder(str(self._ffmpeg_info.path))
+                )
+            encoder_future = threading.Thread(
+                target=_probe_encoder, daemon=True,
+            )
+            encoder_future.start()
+
+        # Measure achievable FPS concurrently with encoder probe.
         target_fps = self._config.fps
         actual_fps = target_fps
         if self._has_video:
@@ -303,8 +324,11 @@ class Recorder:
             width = self._video_capture.width
             height = self._video_capture.height
 
-            venc, venc_opts = _pick_video_encoder(
-                str(self._ffmpeg_info.path),
+            # Wait for the encoder probe that was kicked off earlier.
+            if encoder_future is not None:
+                encoder_future.join(timeout=30)
+            venc, venc_opts = encoder_result[0] if encoder_result else (
+                "libx264", ["-preset", "ultrafast"]
             )
             log.info("Video encoder: %s", venc)
 
@@ -509,12 +533,24 @@ def _pick_video_encoder(
     * **macOS**: VideoToolbox → NVENC → libx264
     * **Linux**: NVENC → VAAPI → QSV → libx264
 
-    The result is cached so subsequent recordings skip the probe.
+    The result is cached both in-memory and on disk so subsequent
+    recordings (even across process restarts) skip the probe.
     """
     global _hw_encoder_cache, _hw_encoder_tested
 
     if not _hw_encoder_tested:
         _hw_encoder_tested = True
+
+        # Try to load from disk cache first.
+        try:
+            if _ENCODER_CACHE_FILE.exists():
+                cached = _ENCODER_CACHE_FILE.read_text().strip()
+                if cached:
+                    log.debug("Loaded cached encoder: %s", cached)
+                    _hw_encoder_cache = cached if cached != "none" else None
+                    return _encoder_result(_hw_encoder_cache)
+        except Exception:
+            pass
 
         if sys.platform == "darwin":
             candidates = ["h264_videotoolbox", "h264_nvenc"]
@@ -542,14 +578,28 @@ def _pick_video_encoder(
             except Exception:
                 continue
 
-    if _hw_encoder_cache == "h264_nvenc":
+        # Persist result to disk.
+        try:
+            _ENCODER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            _ENCODER_CACHE_FILE.write_text(
+                _hw_encoder_cache or "none"
+            )
+        except Exception:
+            pass
+
+    return _encoder_result(_hw_encoder_cache)
+
+
+def _encoder_result(encoder: Optional[str]) -> tuple[str, list[str]]:
+    """Map encoder name to ``(encoder, flags)``."""
+    if encoder == "h264_nvenc":
         return ("h264_nvenc", ["-preset", "p1"])
-    if _hw_encoder_cache == "h264_qsv":
+    if encoder == "h264_qsv":
         return ("h264_qsv", ["-preset", "veryfast"])
-    if _hw_encoder_cache == "h264_amf":
+    if encoder == "h264_amf":
         return ("h264_amf", [])
-    if _hw_encoder_cache == "h264_videotoolbox":
+    if encoder == "h264_videotoolbox":
         return ("h264_videotoolbox", ["-realtime", "1"])
-    if _hw_encoder_cache == "h264_vaapi":
+    if encoder == "h264_vaapi":
         return ("h264_vaapi", [])
     return ("libx264", ["-preset", "ultrafast"])

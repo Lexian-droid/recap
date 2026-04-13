@@ -364,7 +364,7 @@ class Recorder:
             self._audio_capture = AudioCapture(
                 audio_path,
                 process_id=_window_pid,
-                ffmpeg_path=self._ffmpeg_info.path if self._ffmpeg_info else None,
+                ffmpeg_path=str(self._ffmpeg_info.path) if self._ffmpeg_info else None,
             )
             self._audio_capture.start()
             if not self._audio_capture.wait_format_ready(timeout=10):

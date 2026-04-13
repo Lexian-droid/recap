@@ -52,8 +52,9 @@ pub struct AudioCapture {
 #[pymethods]
 impl AudioCapture {
     #[new]
-    #[pyo3(signature = (wav_path, process_id=None))]
-    fn new(wav_path: String, process_id: Option<u32>) -> Self {
+    #[pyo3(signature = (wav_path, process_id=None, ffmpeg_path=None))]
+    fn new(wav_path: String, process_id: Option<u32>, ffmpeg_path: Option<String>) -> Self {
+        let _ = ffmpeg_path; // Not needed for WASAPI backend
         let state = Arc::new(AudioState {
             sample_rate: Mutex::new(48000),
             channels: Mutex::new(2),

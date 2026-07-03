@@ -365,7 +365,10 @@ def _cmd_record(args: argparse.Namespace) -> int:
         if rc == 0:
             print(f"Done. Saved to {config.output}")
         else:
-            _print_error(f"FFmpeg exited with code {rc}", args)
+            if recorder.error:
+                _print_error(str(recorder.error), args)
+            else:
+                _print_error(f"FFmpeg exited with code {rc}", args)
 
     return rc
 

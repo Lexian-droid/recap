@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -82,6 +83,7 @@ class Recorder:
 
         self._ffmpeg_info: Optional[FFmpegInfo] = None
         self._ffmpeg_proc: Optional[subprocess.Popen] = None
+        self._ffmpeg_stderr_file = None
         self._video_capture = None
         self._audio_capture = None
         self._video_relay: Optional[_VideoRelay] = None
@@ -134,6 +136,7 @@ class Recorder:
             with self._lock:
                 self._state = RecorderState.ERROR
                 self._error = exc
+            self._close_ffmpeg_stderr_file()
             raise
 
     def stop(self) -> None:
@@ -191,13 +194,17 @@ class Recorder:
                 self._ffmpeg_proc.wait(timeout=5)
             rc = self._ffmpeg_proc.returncode
             if rc != 0:
+                stderr_tail = self._read_ffmpeg_stderr_tail()
+                err_msg = f"FFmpeg video encode exited with code {rc}"
+                if stderr_tail:
+                    err_msg = f"{err_msg}:\n{stderr_tail}"
                 with self._lock:
                     self._state = RecorderState.ERROR
-                    self._error = FFmpegError(
-                        f"FFmpeg video encode exited with code {rc}"
-                    )
+                    self._error = FFmpegError(err_msg)
+                self._close_ffmpeg_stderr_file()
                 self._cleanup_temp_files(keep_on_failure=True)
                 return rc
+            self._close_ffmpeg_stderr_file()
 
         # Final mux / conversion step.
         try:
@@ -212,13 +219,43 @@ class Recorder:
             with self._lock:
                 self._state = RecorderState.ERROR
                 self._error = exc
+            self._close_ffmpeg_stderr_file()
             self._cleanup_temp_files(keep_on_failure=True)
             return 1
 
         with self._lock:
             self._state = RecorderState.STOPPED
+        self._close_ffmpeg_stderr_file()
         log.info("Recording saved -> %s", self._config.output)
         return 0
+
+    def _open_ffmpeg_stderr_file(self):
+        if self._ffmpeg_stderr_file is None:
+            # Capture stderr to avoid deadlocks while still surfacing failures.
+            self._ffmpeg_stderr_file = tempfile.TemporaryFile(mode="w+b")
+        return self._ffmpeg_stderr_file
+
+    def _read_ffmpeg_stderr_tail(self, max_bytes: int = 16384) -> str:
+        if self._ffmpeg_stderr_file is None:
+            return ""
+        try:
+            self._ffmpeg_stderr_file.flush()
+            self._ffmpeg_stderr_file.seek(0, os.SEEK_END)
+            size = self._ffmpeg_stderr_file.tell()
+            start = max(0, size - max_bytes)
+            self._ffmpeg_stderr_file.seek(start)
+            data = self._ffmpeg_stderr_file.read()
+            return data.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+
+    def _close_ffmpeg_stderr_file(self) -> None:
+        if self._ffmpeg_stderr_file is not None:
+            try:
+                self._ffmpeg_stderr_file.close()
+            except Exception:
+                pass
+            self._ffmpeg_stderr_file = None
 
     # ================================================================
     # Internal – launch pipeline
@@ -369,7 +406,7 @@ class Recorder:
             self._ffmpeg_proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=self._open_ffmpeg_stderr_file(),
                 **_subprocess_flags(),
             )
             # Attach the relay to FFmpeg stdin immediately so video capture

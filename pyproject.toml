@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 recap = "recap.cli:main"
+recap-release = "recap.release:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov"]

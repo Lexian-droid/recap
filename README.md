@@ -99,6 +99,32 @@ When a window is targeted via `--window-title` or `--window-handle`:
 
 GitHub Actions will publish the package to PyPI when you push a tag that starts with `v` (e.g. `v0.5.0`). Wheels are built for Python 3.10–3.13.
 
+For local validation and manual publishing, use the built-in helper command:
+
+```bash
+# install editable package (one-time per env)
+pip install -e .
+
+# smoke-test local install
+recap-release test-local
+
+# build wheel + sdist
+recap-release build
+
+# validate metadata before upload
+recap-release check-dist
+
+# upload manually
+recap-release publish-testpypi
+# or
+recap-release publish-pypi
+```
+
+Notes:
+
+- `publish-*` runs `twine check` automatically unless `--skip-check` is used.
+- `test-local` runs `recap version`, `recap doctor`, `recap monitors`, and `recap devices`.
+
 ## CLI Usage
 
 ```bash

@@ -391,10 +391,16 @@ class Recorder:
                 "-framerate", str(actual_fps),
                 "-i", "pipe:0",
             ]
+            vf_filters: list[str] = []
             if self._config.has_crop:
                 crop_filter = self._config.build_crop_filter(width, height)
-                cmd += ["-vf", crop_filter]
+                vf_filters.append(crop_filter)
                 log.info("Crop filter: %s", crop_filter)
+
+            # yuv420p encoders require even dimensions; apply a safe 1px crop
+            # when needed (no-op for already-even sizes).
+            vf_filters.append("crop=trunc(iw/2)*2:trunc(ih/2)*2")
+            cmd += ["-vf", ",".join(vf_filters)]
 
             cmd += [
                 "-c:v", venc, *(venc_opts or []),

@@ -6,6 +6,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build distributions
@@ -33,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build]
     permissions:
+      contents: read
       id-token: write
     environment:
       name: pypi

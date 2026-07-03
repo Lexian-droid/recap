@@ -360,19 +360,6 @@ def _make_bitmapinfo(width: int, height: int) -> _BITMAPINFOHEADER:
 
 
 # ---------------------------------------------------------------------------
-# Native backend delegation
-# ---------------------------------------------------------------------------
-
-try:
-    from recap._native import NATIVE_AVAILABLE
-    if NATIVE_AVAILABLE:
-        from recap._native import NativeVideoCapture
-        _PythonVideoCapture = VideoCapture
-        VideoCapture = NativeVideoCapture
-except ImportError:
-    pass
-
-# ---------------------------------------------------------------------------
 # Cross-platform dispatch for non-Windows platforms
 # ---------------------------------------------------------------------------
 

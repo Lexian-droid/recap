@@ -11,7 +11,6 @@ Cross-platform headless screen and audio capture library and CLI.
 - Video-only, audio-only, or audio+video modes
 - Crop support with configurable size and anchor position
 - CLI tool (`recap`) and importable Python library
-- Rust native backend (PyO3) for Windows, with automatic fallback to pure-Python
 - Uses FFmpeg for encoding/muxing only
 
 ## Platform Support
@@ -22,7 +21,6 @@ Cross-platform headless screen and audio capture library and CLI.
 | Window capture | ✓ PrintWindow | ✓ CGWindowListCreateImage | ✓ X11 XGetImage |
 | System audio | ✓ WASAPI loopback | ⚠ Requires BlackHole/Soundflower | ✓ PulseAudio monitor |
 | Per-app audio | ✓ WASAPI process loopback | ✗ Not supported | ✗ Not supported |
-| Rust backend | ✓ | — | — |
 | HW encoding | NVENC / QSV / AMF | VideoToolbox / NVENC | NVENC / VAAPI / QSV |
 
 ### macOS Notes
@@ -41,7 +39,6 @@ Cross-platform headless screen and audio capture library and CLI.
 
 - **Python** 3.10–3.13
 - **FFmpeg** on PATH or specified via `--ffmpeg`
-- **Rust toolchain** (only if building from source on Windows)
 
 ### Platform-specific requirements
 
@@ -59,26 +56,19 @@ pip install recap-capture
 
 ### From source (editable)
 
-Requires [maturin](https://www.maturin.rs/) and the Rust toolchain (for the Windows native backend):
-
 ```bash
-pip install maturin
 git clone https://github.com/Lexian-droid/recap.git
 cd recap
-maturin develop --release   # builds native backend (Windows only)
 pip install -e .
 ```
 
-On macOS/Linux, skip the `maturin develop` step if you don't need the Rust backend — the pure-Python implementations are used automatically.
-
 ## Architecture
 
-The project has a hybrid Python/Rust structure with a platform abstraction layer:
+The project uses a Python package with a platform abstraction layer:
 
 ```
 recap/              Python package (CLI, config, orchestration)
   __init__.py       Public API and version
-  _native.py        Bridge to Rust — sets NATIVE_AVAILABLE flag
   cli.py            CLI entry point
   config.py         RecordingConfig dataclass
   recorder.py       Orchestrates capture threads + FFmpeg
@@ -92,18 +82,11 @@ recap/              Python package (CLI, config, orchestration)
     macos/          macOS backends (CoreGraphics + FFmpeg avfoundation)
     linux/          Linux backends (X11 + FFmpeg pulse/alsa)
 
-rust_core/          Rust native backend (PyO3/maturin, Windows only)
-  src/lib.rs        PyO3 module registration
-  src/video.rs      GDI BitBlt / PrintWindow video capture
-  src/audio.rs      WASAPI loopback + process loopback audio capture
-  src/discovery.rs  Monitor/window/audio device enumeration
 ```
 
 ### Platform dispatch
 
 The `video.py`, `audio.py`, and `discovery.py` modules contain the Windows implementation at the top level. On macOS or Linux, platform-specific implementations are imported from `recap/platforms/` and replace the module-level names. This means the public API (`from recap import VideoCapture`) works identically regardless of platform.
-
-On Windows, the Rust extension (`recap._rust_core`) can further replace the Python backends with native implementations for maximum performance.
 
 ### Window-specific recording
 
@@ -114,7 +97,7 @@ When a window is targeted via `--window-title` or `--window-handle`:
 
 ## Releasing
 
-GitHub Actions will publish the package to PyPI when you push a tag that starts with `v` (e.g. `v0.5.0`). Wheels are built for Python 3.10–3.13. The Rust native backend is compiled for Windows; macOS and Linux use pure-Python backends.
+GitHub Actions will publish the package to PyPI when you push a tag that starts with `v` (e.g. `v0.5.0`). Wheels are built for Python 3.10–3.13.
 
 ## CLI Usage
 

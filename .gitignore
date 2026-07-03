@@ -7,14 +7,6 @@ dist/
 build/
 *.egg-info/
 
-# Compiled native extensions (maturin output)
-*.pyd
-*.so
-*.pdb
-
-# Rust build artifacts
-rust_core/target/
-
 # Recording test output
 recording.mp4
 quick-test.mp4

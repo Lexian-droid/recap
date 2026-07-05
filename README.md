@@ -32,6 +32,7 @@ Cross-platform headless screen and audio capture library and CLI.
 ### Linux Notes
 
 - Video capture requires **X11** (XWayland is acceptable). Native Wayland capture is not yet supported. If running under Wayland, ensure `DISPLAY` is set for XWayland.
+- Discovery commands support selecting an explicit X11 display with `--display` (for example `recap windows --display :99`).
 - Audio capture uses **PulseAudio/PipeWire** loopback (`default.monitor`). Ensure `pactl` is available (`pulseaudio-utils` or `pipewire-pulse`).
 - Per-application audio capture is not directly supported; system-wide audio is captured instead.
 
@@ -136,11 +137,18 @@ recap monitors
 recap windows
 recap devices
 
+# List targets on a virtual X11 display
+recap monitors --display :99
+recap windows --display :99
+
 # Record primary monitor with audio
 recap record --output recording.mp4
 
 # Record a specific window (video + window-specific audio on Windows)
 recap record --window-title "Notepad" --output notepad.mp4
+
+# Record from a window on a virtual X11 display
+recap record --window-title "Videos - WeAnimate" --display :99 --output weanimate.mp4
 
 # Record video only
 recap record --video-only --output silent.mp4
@@ -178,6 +186,25 @@ recorder = Recorder(config)
 recorder.start()
 # ... do work ...
 recorder.stop()
+recorder.wait()
+```
+
+### Library usage with virtual displays (Linux)
+
+```python
+from recap import Recorder, RecordingConfig, list_windows
+
+# Discover windows on a virtual X11 display.
+windows = list_windows(display=":99")
+
+config = RecordingConfig(
+  output="weanimate.mp4",
+  window_title="Videos - WeAnimate",
+  display=":99",
+  duration=10,
+)
+recorder = Recorder(config)
+recorder.start()
 recorder.wait()
 ```
 

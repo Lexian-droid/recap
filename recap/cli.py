@@ -6,12 +6,14 @@ Entry-point: ``recap`` console command (installed via ``console_scripts``).
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import logging
 import signal
 import sys
 import textwrap
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from recap import __version__
@@ -92,6 +94,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Capture the window with this HWND (decimal or hex).",
     )
     rec.add_argument(
+        "--display",
+        default=None,
+        help=(
+            "X11 display to use on Linux (for example: :99). "
+            "Defaults to current DISPLAY."
+        ),
+    )
+    rec.add_argument(
         "--no-audio",
         action="store_true",
         help="Do not capture audio.",
@@ -157,9 +167,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── discovery commands ────────────────────────────────────────
     mon = sub.add_parser("monitors", help="List available monitors.")
+    mon.add_argument(
+        "--display",
+        default=None,
+        help=(
+            "X11 display to query on Linux (for example: :99). "
+            "Defaults to current DISPLAY."
+        ),
+    )
     mon.add_argument("--json", action="store_true", dest="json_output")
 
     win = sub.add_parser("windows", help="List visible windows.")
+    win.add_argument(
+        "--display",
+        default=None,
+        help=(
+            "X11 display to query on Linux (for example: :99). "
+            "Defaults to current DISPLAY."
+        ),
+    )
     win.add_argument("--json", action="store_true", dest="json_output")
 
     dev = sub.add_parser("devices", help="List audio output devices.")
@@ -231,7 +257,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _cmd_monitors(args: argparse.Namespace) -> int:
     from recap.discovery import list_monitors
 
-    monitors = list_monitors()
+    with _override_display(getattr(args, "display", None)):
+        monitors = list_monitors()
 
     if getattr(args, "json_output", False):
         print(json.dumps([m.as_dict() for m in monitors], indent=2))
@@ -251,7 +278,8 @@ def _cmd_monitors(args: argparse.Namespace) -> int:
 def _cmd_windows(args: argparse.Namespace) -> int:
     from recap.discovery import list_windows
 
-    windows = list_windows()
+    with _override_display(getattr(args, "display", None)):
+        windows = list_windows()
 
     if getattr(args, "json_output", False):
         print(json.dumps([w.as_dict() for w in windows], indent=2))
@@ -293,84 +321,86 @@ def _cmd_record(args: argparse.Namespace) -> int:
     from recap.exceptions import ConfigError, RecapError
     from recap.recorder import Recorder
 
-    crop_width = None
-    crop_height = None
-    if args.crop_size is not None:
-        crop_width, crop_height = args.crop_size
+    with _override_display(getattr(args, "display", None)):
+        crop_width = None
+        crop_height = None
+        if args.crop_size is not None:
+            crop_width, crop_height = args.crop_size
 
-    try:
-        config = RecordingConfig(
-            output=args.output,
-            monitor=args.monitor,
-            window_title=args.window_title,
-            window_handle=args.window_handle,
-            no_audio=args.no_audio,
-            audio_only=args.audio_only,
-            video_only=args.video_only,
-            duration=args.duration,
-            fps=args.fps,
-            crop_width=crop_width,
-            crop_height=crop_height,
-            crop_position=args.crop_position,
-            ffmpeg=args.ffmpeg,
-            overwrite=args.overwrite,
-            json_output=args.json_output,
-        )
-    except ConfigError as exc:
-        _print_error(str(exc), args)
-        return EXIT_CONFIG
+        try:
+            config = RecordingConfig(
+                output=args.output,
+                monitor=args.monitor,
+                window_title=args.window_title,
+                window_handle=args.window_handle,
+                no_audio=args.no_audio,
+                audio_only=args.audio_only,
+                video_only=args.video_only,
+                duration=args.duration,
+                fps=args.fps,
+                crop_width=crop_width,
+                crop_height=crop_height,
+                crop_position=args.crop_position,
+                ffmpeg=args.ffmpeg,
+                display=args.display,
+                overwrite=args.overwrite,
+                json_output=args.json_output,
+            )
+        except ConfigError as exc:
+            _print_error(str(exc), args)
+            return EXIT_CONFIG
 
-    recorder = Recorder(config)
+        recorder = Recorder(config)
 
-    # Graceful stop via SIGINT / SIGBREAK / named event
-    stop_event = threading.Event()
+        # Graceful stop via SIGINT / SIGBREAK / named event
+        stop_event = threading.Event()
 
-    def _signal_stop(*_a):
-        if not stop_event.is_set():
-            stop_event.set()
-            recorder.stop()
+        def _signal_stop(*_a):
+            if not stop_event.is_set():
+                stop_event.set()
+                recorder.stop()
 
-    signal.signal(signal.SIGINT, _signal_stop)
-    if hasattr(signal, "SIGBREAK"):
-        signal.signal(signal.SIGBREAK, _signal_stop)
+        signal.signal(signal.SIGINT, _signal_stop)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _signal_stop)
 
-    # Also create a named Win32 event so parent processes can stop us
-    _create_stop_event(stop_event, recorder)
+        # Also create a named Win32 event so parent processes can stop us
+        _create_stop_event(stop_event, recorder)
 
-    try:
-        recorder.start()
-    except RecapError as exc:
-        _print_error(str(exc), args)
-        return EXIT_ERROR
+        try:
+            recorder.start()
+        except RecapError as exc:
+            _print_error(str(exc), args)
+            return EXIT_ERROR
 
-    if not args.json_output:
-        if config.duration:
-            print(f"Recording for {config.duration}s -> {config.output}")
-        else:
-            print(f"Recording -> {config.output}  (send signal or set event to stop)")
-
-    # Block until stopped
-    rc = recorder.wait()
-
-    if args.json_output:
-        result = {
-            "output": str(config.output),
-            "state": recorder.state.value,
-            "exit_code": rc,
-        }
-        if recorder.error:
-            result["error"] = str(recorder.error)
-        print(json.dumps(result, indent=2, default=str))
-    else:
-        if rc == 0:
-            print(f"Done. Saved to {config.output}")
-        else:
-            if recorder.error:
-                _print_error(str(recorder.error), args)
+        if not args.json_output:
+            if config.duration:
+                print(f"Recording for {config.duration}s -> {config.output}")
             else:
-                _print_error(f"FFmpeg exited with code {rc}", args)
+                print(f"Recording -> {config.output}  (send signal or set event to stop)")
 
-    return rc
+        # Block until stopped
+        rc = recorder.wait()
+
+        if args.json_output:
+            result = {
+                "output": str(config.output),
+                "state": recorder.state.value,
+                "exit_code": rc,
+            }
+            if recorder.error:
+                result["error"] = str(recorder.error)
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            if rc == 0:
+                print(f"Done. Saved to {config.output}")
+            else:
+                if recorder.error:
+                    _print_error(str(recorder.error), args)
+                else:
+                    _print_error(f"FFmpeg exited with code {rc}", args)
+
+        return rc
 
 
 # ------------------------------------------------------------------
@@ -382,6 +412,24 @@ def _print_error(msg: str, args: argparse.Namespace) -> None:
         print(json.dumps({"error": msg}), file=sys.stderr)
     else:
         print(f"Error: {msg}", file=sys.stderr)
+
+
+@contextmanager
+def _override_display(display: str | None):
+    """Temporarily override DISPLAY for Linux discovery and recording commands."""
+    if not (display and sys.platform.startswith("linux")):
+        yield
+        return
+
+    previous = os.environ.get("DISPLAY")
+    os.environ["DISPLAY"] = display
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = previous
 
 
 def _parse_crop_size(value: str) -> tuple[int, int]:

@@ -58,6 +58,9 @@ class RecordingConfig:
         Target frames per second for video capture.
     ffmpeg : str | None
         Explicit path to the ffmpeg binary. ``None`` means auto-detect.
+    display : str | None
+        Linux X11 display to use (for example ``:99``). ``None`` means
+        use the current ``DISPLAY`` environment variable.
     overwrite : bool
         Overwrite the output file if it already exists.
     json_output : bool
@@ -80,6 +83,7 @@ class RecordingConfig:
     duration: Optional[float] = None
     fps: int = 30
     ffmpeg: Optional[str] = None
+    display: Optional[str] = None
     overwrite: bool = False
     json_output: bool = False
     crop_width: Optional[int] = None
@@ -139,6 +143,11 @@ class RecordingConfig:
         # FPS must be positive
         if self.fps <= 0:
             raise ConfigError("--fps must be a positive integer.")
+
+        if self.display is not None:
+            self.display = self.display.strip()
+            if not self.display:
+                raise ConfigError("--display cannot be empty.")
 
         # Output file collision
         if not self.overwrite and self.output.exists():

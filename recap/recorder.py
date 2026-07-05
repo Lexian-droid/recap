@@ -95,6 +95,8 @@ class Recorder:
         self._has_audio = False
         self._temp_video_path: Optional[Path] = None
         self._temp_audio_path: Optional[Path] = None
+        self._display_overridden = False
+        self._previous_display: Optional[str] = None
 
     # ── Properties ──────────────────────────────────────────────────
 
@@ -122,6 +124,7 @@ class Recorder:
             self._state = RecorderState.STARTING
 
         try:
+            self._apply_display_override()
             self._ffmpeg_info = find_ffmpeg(self._config.ffmpeg)
             log.info(
                 "Using FFmpeg: %s (%s)",
@@ -137,6 +140,7 @@ class Recorder:
                 self._state = RecorderState.ERROR
                 self._error = exc
             self._close_ffmpeg_stderr_file()
+            self._restore_display_override()
             raise
 
     def stop(self) -> None:
@@ -167,67 +171,93 @@ class Recorder:
 
         After this returns the state is either ``STOPPED`` or ``ERROR``.
         """
-        if not self._stop_event.wait(timeout=timeout):
-            self.stop()
+        try:
+            if not self._stop_event.wait(timeout=timeout):
+                self.stop()
 
-        # Wait for capture threads to finish (they see the stop event).
-        if self._video_capture is not None:
-            self._video_capture.wait(timeout=30)
-        if self._audio_capture is not None:
-            self._audio_capture.wait(timeout=30)
+            # Wait for capture threads to finish (they see the stop event).
+            if self._video_capture is not None:
+                self._video_capture.wait(timeout=30)
+            if self._audio_capture is not None:
+                self._audio_capture.wait(timeout=30)
 
-        # Close video FFmpeg stdin so it sees EOF and finalizes.
-        if self._ffmpeg_proc is not None and self._ffmpeg_proc.stdin:
+            # Close video FFmpeg stdin so it sees EOF and finalizes.
+            if self._ffmpeg_proc is not None and self._ffmpeg_proc.stdin:
+                try:
+                    self._ffmpeg_proc.stdin.close()
+                except Exception:
+                    pass
+
+            # Wait for video-encoding FFmpeg to finalize the temp file.
+            wait_timeout = timeout or 30
+            if self._ffmpeg_proc is not None:
+                try:
+                    self._ffmpeg_proc.wait(timeout=wait_timeout)
+                except subprocess.TimeoutExpired:
+                    log.warning("FFmpeg did not exit in time, terminating.")
+                    self._ffmpeg_proc.terminate()
+                    self._ffmpeg_proc.wait(timeout=5)
+                rc = self._ffmpeg_proc.returncode
+                if rc != 0:
+                    stderr_tail = self._read_ffmpeg_stderr_tail()
+                    err_msg = f"FFmpeg video encode exited with code {rc}"
+                    if stderr_tail:
+                        err_msg = f"{err_msg}:\n{stderr_tail}"
+                    with self._lock:
+                        self._state = RecorderState.ERROR
+                        self._error = FFmpegError(err_msg)
+                    self._close_ffmpeg_stderr_file()
+                    self._cleanup_temp_files(keep_on_failure=True)
+                    return rc
+                self._close_ffmpeg_stderr_file()
+
+            # Final mux / conversion step.
             try:
-                self._ffmpeg_proc.stdin.close()
-            except Exception:
-                pass
-
-        # Wait for video-encoding FFmpeg to finalize the temp file.
-        wait_timeout = timeout or 30
-        if self._ffmpeg_proc is not None:
-            try:
-                self._ffmpeg_proc.wait(timeout=wait_timeout)
-            except subprocess.TimeoutExpired:
-                log.warning("FFmpeg did not exit in time, terminating.")
-                self._ffmpeg_proc.terminate()
-                self._ffmpeg_proc.wait(timeout=5)
-            rc = self._ffmpeg_proc.returncode
-            if rc != 0:
-                stderr_tail = self._read_ffmpeg_stderr_tail()
-                err_msg = f"FFmpeg video encode exited with code {rc}"
-                if stderr_tail:
-                    err_msg = f"{err_msg}:\n{stderr_tail}"
+                if self._has_video and self._has_audio:
+                    self._mux_audio_video()
+                    self._cleanup_temp_files()
+                elif self._has_audio and not self._has_video:
+                    if self._temp_audio_path is not None:
+                        self._convert_audio()
+                        self._cleanup_temp_files()
+            except Exception as exc:
                 with self._lock:
                     self._state = RecorderState.ERROR
-                    self._error = FFmpegError(err_msg)
+                    self._error = exc
                 self._close_ffmpeg_stderr_file()
                 self._cleanup_temp_files(keep_on_failure=True)
-                return rc
-            self._close_ffmpeg_stderr_file()
+                return 1
 
-        # Final mux / conversion step.
-        try:
-            if self._has_video and self._has_audio:
-                self._mux_audio_video()
-                self._cleanup_temp_files()
-            elif self._has_audio and not self._has_video:
-                if self._temp_audio_path is not None:
-                    self._convert_audio()
-                    self._cleanup_temp_files()
-        except Exception as exc:
             with self._lock:
-                self._state = RecorderState.ERROR
-                self._error = exc
+                self._state = RecorderState.STOPPED
             self._close_ffmpeg_stderr_file()
-            self._cleanup_temp_files(keep_on_failure=True)
-            return 1
+            log.info("Recording saved -> %s", self._config.output)
+            return 0
+        finally:
+            self._restore_display_override()
 
-        with self._lock:
-            self._state = RecorderState.STOPPED
-        self._close_ffmpeg_stderr_file()
-        log.info("Recording saved -> %s", self._config.output)
-        return 0
+    def _apply_display_override(self) -> None:
+        """Apply Linux DISPLAY override from config if requested."""
+        display = getattr(self._config, "display", None)
+        if not (display and sys.platform.startswith("linux")):
+            return
+        if self._display_overridden:
+            return
+
+        self._previous_display = os.environ.get("DISPLAY")
+        os.environ["DISPLAY"] = display
+        self._display_overridden = True
+
+    def _restore_display_override(self) -> None:
+        """Restore DISPLAY after recording lifecycle completes."""
+        if not self._display_overridden:
+            return
+        if self._previous_display is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = self._previous_display
+        self._previous_display = None
+        self._display_overridden = False
 
     def _open_ffmpeg_stderr_file(self):
         if self._ffmpeg_stderr_file is None:
@@ -303,7 +333,10 @@ class Recorder:
                 vid_kwargs["window_handle"] = self._config.window_handle
                 if self._has_audio:
                     from recap.discovery import find_window_by_handle
-                    _win = find_window_by_handle(self._config.window_handle)
+                    _win = find_window_by_handle(
+                        self._config.window_handle,
+                        display=self._config.display,
+                    )
                     if _win is not None:
                         _window_pid = _win.pid
                     else:
@@ -315,7 +348,10 @@ class Recorder:
             elif self._config.window_title is not None:
                 from recap.discovery import find_window_by_title
 
-                win = find_window_by_title(self._config.window_title)
+                win = find_window_by_title(
+                    self._config.window_title,
+                    display=self._config.display,
+                )
                 if win is None:
                     raise CaptureError(
                         f"No visible window matching "

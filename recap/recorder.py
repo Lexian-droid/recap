@@ -95,6 +95,7 @@ class Recorder:
         self._has_audio = False
         self._temp_video_path: Optional[Path] = None
         self._temp_audio_path: Optional[Path] = None
+        self._av_start_offset: Optional[float] = None
         self._display_overridden = False
         self._previous_display: Optional[str] = None
 
@@ -478,6 +479,19 @@ class Recorder:
             self._video_relay.set_target(self._ffmpeg_proc.stdin)
 
         # ── optional duration cap ───────────────────────────────────
+        if self._has_video and self._has_audio:
+            a_started = getattr(self._audio_capture, "started_at", None)
+            v_started = getattr(self._video_capture, "started_at", None)
+            if isinstance(a_started, float) and isinstance(v_started, float):
+                # Positive value means audio timeline starts later than video.
+                self._av_start_offset = a_started - v_started
+                log.info(
+                    "Measured A/V start offset: audio-video = %.3fs",
+                    self._av_start_offset,
+                )
+            else:
+                self._av_start_offset = None
+
         if self._config.duration is not None:
             self._duration_timer = threading.Timer(
                 self._config.duration, self.stop,
@@ -491,9 +505,24 @@ class Recorder:
         """Combine temp video and temp WAV into the final output."""
         ffmpeg = str(self._ffmpeg_info.path)
         ow = "-y" if self._config.overwrite else "-n"
+
+        # Compensate delayed-audio starts seen on some Linux pulse setups.
+        # If audio started later than video by a measurable margin, trim that
+        # leading offset from the captured WAV during mux.
+        audio_trim = 0.0
+        if isinstance(self._av_start_offset, float) and self._av_start_offset > 0.05:
+            audio_trim = self._av_start_offset
+            log.info("Applying audio start trim: %.3fs", audio_trim)
+
         cmd = [
             ffmpeg, ow,
             "-i", str(self._temp_video_path),
+        ]
+
+        if audio_trim > 0.0:
+            cmd += ["-ss", f"{audio_trim:.3f}"]
+
+        cmd += [
             "-i", str(self._temp_audio_path),
             "-map", "0:v:0",
             "-map", "1:a:0",

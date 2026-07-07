@@ -95,7 +95,6 @@ class Recorder:
         self._has_audio = False
         self._temp_video_path: Optional[Path] = None
         self._temp_audio_path: Optional[Path] = None
-        self._av_start_offset: Optional[float] = None
         self._display_overridden = False
         self._previous_display: Optional[str] = None
 
@@ -479,24 +478,6 @@ class Recorder:
             self._video_relay.set_target(self._ffmpeg_proc.stdin)
 
         # ── optional duration cap ───────────────────────────────────
-        if self._has_video and self._has_audio:
-            a_started = getattr(self._audio_capture, "started_at", None)
-            v_started = getattr(self._video_capture, "started_at", None)
-            if isinstance(a_started, float) and isinstance(v_started, float):
-                # Audio capture is started first (see above), so its first
-                # real samples normally precede the first video frame.
-                # Positive value means video's first frame lags behind the
-                # first audio sample by this many seconds; that much needs
-                # to be trimmed off the *start* of the audio so frame 0
-                # lines up with the matching audio sample.
-                self._av_start_offset = v_started - a_started
-                log.info(
-                    "Measured A/V start offset: video-audio = %.3fs",
-                    self._av_start_offset,
-                )
-            else:
-                self._av_start_offset = None
-
         if self._config.duration is not None:
             self._duration_timer = threading.Timer(
                 self._config.duration, self.stop,
@@ -511,38 +492,34 @@ class Recorder:
         ffmpeg = str(self._ffmpeg_info.path)
         ow = "-y" if self._config.overwrite else "-n"
 
-        # Audio capture is started before video, so the WAV file usually
-        # contains a lead-in of extra audio recorded before the first video
-        # frame. Trim that lead-in so audio sample 0 lines up with video
-        # frame 0.
-        audio_trim = 0.0
-        if isinstance(self._av_start_offset, float) and self._av_start_offset > 0.05:
-            audio_trim = self._av_start_offset
-            log.info("Applying audio start trim: %.3fs", audio_trim)
+        # The captured WAV can contain a leading stretch of real silence
+        # (PulseAudio buffer negotiation on Linux) before actual audio
+        # content begins. Strip that dynamically -- regardless of its exact
+        # length -- rather than relying on a fixed/measured offset, then pad
+        # the tail back out so total duration still matches the video.
+        audio_filters = [
+            "silenceremove=start_periods=1:start_duration=0:"
+            "start_threshold=-45dB:detection=peak",
+            "apad",
+        ]
 
         cmd = [
             ffmpeg, ow,
             "-i", str(self._temp_video_path),
-        ]
-
-        if audio_trim > 0.0:
-            cmd += ["-ss", f"{audio_trim:.3f}"]
-
-        cmd += [
             "-i", str(self._temp_audio_path),
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
+            "-af", ",".join(audio_filters),
         ]
 
         if self._config.duration is not None:
-            # Keep fixed-duration recordings stable even if audio starts late.
-            cmd += ["-af", "apad", "-t", str(self._config.duration)]
+            # Keep fixed-duration recordings stable even after silence trim.
+            cmd += ["-t", str(self._config.duration)]
         else:
-            # Prefer full video span in manual-stop recordings and pad audio
-            # when it started slightly later.
-            cmd += ["-af", "apad", "-shortest"]
+            # Prefer full video span in manual-stop recordings.
+            cmd += ["-shortest"]
 
         cmd.append(str(self._config.output))
         log.debug("FFmpeg mux command: %s", cmd)

@@ -8,6 +8,7 @@ subprocess with the appropriate input format.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -152,6 +153,15 @@ class AudioCapture:
         cmd = [
             ffmpeg_path, "-y",
             "-f", fmt,
+        ]
+        if fmt == "pulse":
+            # PulseAudio negotiates a recording buffer on stream start and
+            # commonly pads the beginning with real silence while that
+            # buffer fills (observed as ~1-1.5s of dead air before actual
+            # audio content). Requesting a small fragment size shrinks that
+            # negotiated buffer and starts delivering real samples sooner.
+            cmd += ["-fragment_size", "256"]
+        cmd += [
             "-i", device,
             "-acodec", "pcm_s16le",
             "-ar", str(self._sample_rate),
@@ -160,11 +170,19 @@ class AudioCapture:
         ]
         log.debug("FFmpeg audio capture command: %s", cmd)
 
+        # PULSE_LATENCY_MSEC is honored directly by libpulse and overrides
+        # the default (often multi-second) client buffering target, which
+        # is the main source of the leading-silence gap on Linux.
+        capture_env = os.environ.copy()
+        if fmt == "pulse":
+            capture_env.setdefault("PULSE_LATENCY_MSEC", "30")
+
         self._ffmpeg_proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=capture_env,
         )
 
         # Treat "started" as "first samples written" so fixed-duration

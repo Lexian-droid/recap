@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from typing import Optional
 
 from recap.discovery import AudioDeviceInfo, MonitorInfo, WindowInfo
@@ -27,29 +28,37 @@ log = logging.getLogger(__name__)
 # Display server detection
 # ---------------------------------------------------------------------------
 
-_DISPLAY_SERVER: Optional[str] = None
-
-
 def _detect_display_server() -> str:
     """Detect the display server in use: 'x11', 'wayland', or 'none'."""
-    global _DISPLAY_SERVER
-    if _DISPLAY_SERVER is not None:
-        return _DISPLAY_SERVER
-
     session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
     wayland = os.environ.get("WAYLAND_DISPLAY", "")
     x_display = os.environ.get("DISPLAY", "")
 
     if x_display:
-        _DISPLAY_SERVER = "x11"
+        return "x11"
     elif session_type == "wayland" or wayland:
-        _DISPLAY_SERVER = "wayland"
+        return "wayland"
     elif session_type == "x11":
-        _DISPLAY_SERVER = "x11"
+        return "x11"
     else:
-        _DISPLAY_SERVER = "none"
+        return "none"
 
-    return _DISPLAY_SERVER
+
+@contextmanager
+def _override_display(display: str | None):
+    if not display:
+        yield
+        return
+
+    previous = os.environ.get("DISPLAY")
+    os.environ["DISPLAY"] = display
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = previous
 
 
 # ---------------------------------------------------------------------------
@@ -271,57 +280,58 @@ def _get_window_name(display: ctypes.c_void_p, window: int) -> str:
 # =========================================================================
 
 
-def list_monitors() -> list[MonitorInfo]:
+def list_monitors(*, display: str | None = None) -> list[MonitorInfo]:
     """Enumerate monitors using ``xrandr`` command output."""
-    monitors: list[MonitorInfo] = []
+    with _override_display(display):
+        monitors: list[MonitorInfo] = []
 
-    xrandr = shutil.which("xrandr")
-    if xrandr is None:
-        # Fallback: report root window as single monitor
-        ds = _detect_display_server()
-        if ds == "x11":
-            return _list_monitors_x11_fallback()
-        raise CaptureError(
-            "xrandr not found. Install xrandr or use an X11 desktop session."
-        )
-
-    try:
-        result = subprocess.run(
-            [xrandr, "--query"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        for line in result.stdout.split("\n"):
-            if " connected " not in line:
-                continue
-            match = re.search(
-                r"(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)",
-                line,
+        xrandr = shutil.which("xrandr")
+        if xrandr is None:
+            # Fallback: report root window as single monitor
+            ds = _detect_display_server()
+            if ds == "x11":
+                return _list_monitors_x11_fallback()
+            raise CaptureError(
+                "xrandr not found. Install xrandr or use an X11 desktop session."
             )
-            if match:
-                name = match.group(1)
-                is_primary = match.group(2) is not None
-                width = int(match.group(3))
-                height = int(match.group(4))
-                x = int(match.group(5))
-                y = int(match.group(6))
-                monitors.append(MonitorInfo(
-                    index=len(monitors),
-                    name=name,
-                    x=x,
-                    y=y,
-                    width=width,
-                    height=height,
-                    is_primary=is_primary,
-                ))
-    except Exception as exc:
-        log.debug("xrandr enumeration failed: %s", exc)
-        return _list_monitors_x11_fallback()
 
-    if not monitors:
-        return _list_monitors_x11_fallback()
-    return monitors
+        try:
+            result = subprocess.run(
+                [xrandr, "--query"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            for line in result.stdout.split("\n"):
+                if " connected " not in line:
+                    continue
+                match = re.search(
+                    r"(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)",
+                    line,
+                )
+                if match:
+                    name = match.group(1)
+                    is_primary = match.group(2) is not None
+                    width = int(match.group(3))
+                    height = int(match.group(4))
+                    x = int(match.group(5))
+                    y = int(match.group(6))
+                    monitors.append(MonitorInfo(
+                        index=len(monitors),
+                        name=name,
+                        x=x,
+                        y=y,
+                        width=width,
+                        height=height,
+                        is_primary=is_primary,
+                    ))
+        except Exception as exc:
+            log.debug("xrandr enumeration failed: %s", exc)
+            return _list_monitors_x11_fallback()
+
+        if not monitors:
+            return _list_monitors_x11_fallback()
+        return monitors
 
 
 def _list_monitors_x11_fallback() -> list[MonitorInfo]:
@@ -352,34 +362,39 @@ def _list_monitors_x11_fallback() -> list[MonitorInfo]:
         x11.XCloseDisplay(display)
 
 
-def list_windows(*, include_hidden: bool = False) -> list[WindowInfo]:
+def list_windows(
+    *,
+    include_hidden: bool = False,
+    display: str | None = None,
+) -> list[WindowInfo]:
     """Enumerate top-level windows.
 
     Uses _NET_CLIENT_LIST if available (most EWMH-compliant WMs),
     otherwise falls back to XQueryTree.
     """
-    ds = _detect_display_server()
-    if ds == "wayland":
-        log.warning(
-            "Window enumeration is limited on Wayland. "
-            "For full support, use X11 or XWayland."
-        )
-        # Try via XWayland if DISPLAY is set
-        if not os.environ.get("DISPLAY"):
+    with _override_display(display):
+        ds = _detect_display_server()
+        if ds == "wayland":
+            log.warning(
+                "Window enumeration is limited on Wayland. "
+                "For full support, use X11 or XWayland."
+            )
+            # Try via XWayland if DISPLAY is set
+            if not os.environ.get("DISPLAY"):
+                return []
+
+        x11 = _load_x11()
+        if x11 is None:
             return []
 
-    x11 = _load_x11()
-    if x11 is None:
-        return []
+        display_ptr = x11.XOpenDisplay(None)
+        if not display_ptr:
+            return []
 
-    display = x11.XOpenDisplay(None)
-    if not display:
-        return []
-
-    try:
-        return _list_windows_x11(display, include_hidden)
-    finally:
-        x11.XCloseDisplay(display)
+        try:
+            return _list_windows_x11(display_ptr, include_hidden)
+        finally:
+            x11.XCloseDisplay(display_ptr)
 
 
 def _list_windows_x11(
@@ -482,18 +497,26 @@ def _list_windows_x11(
     return windows
 
 
-def find_window_by_title(substring: str) -> Optional[WindowInfo]:
+def find_window_by_title(
+    substring: str,
+    *,
+    display: str | None = None,
+) -> Optional[WindowInfo]:
     """Find the first visible window whose title contains *substring*."""
     lower = substring.lower()
-    for win in list_windows():
+    for win in list_windows(display=display):
         if lower in win.title.lower():
             return win
     return None
 
 
-def find_window_by_handle(window_id: int) -> Optional[WindowInfo]:
+def find_window_by_handle(
+    window_id: int,
+    *,
+    display: str | None = None,
+) -> Optional[WindowInfo]:
     """Return window info for a specific X11 window ID."""
-    for win in list_windows(include_hidden=True):
+    for win in list_windows(include_hidden=True, display=display):
         if win.handle == window_id:
             return win
     return None

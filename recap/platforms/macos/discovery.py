@@ -196,8 +196,9 @@ def _ensure_window_keys() -> None:
 # =========================================================================
 
 
-def list_monitors() -> list[MonitorInfo]:
+def list_monitors(*, display: str | None = None) -> list[MonitorInfo]:
     """Enumerate connected displays using CoreGraphics."""
+    _ = display
     if _cg is None:
         raise CaptureError(
             "CoreGraphics framework not available. "
@@ -230,8 +231,13 @@ def list_monitors() -> list[MonitorInfo]:
     return monitors
 
 
-def list_windows(*, include_hidden: bool = False) -> list[WindowInfo]:
+def list_windows(
+    *,
+    include_hidden: bool = False,
+    display: str | None = None,
+) -> list[WindowInfo]:
     """Enumerate visible windows using CoreGraphics."""
+    _ = display
     if _cg is None or _cf is None:
         raise CaptureError(
             "CoreGraphics/CoreFoundation frameworks not available."
@@ -286,18 +292,26 @@ def list_windows(*, include_hidden: bool = False) -> list[WindowInfo]:
     return windows
 
 
-def find_window_by_title(substring: str) -> Optional[WindowInfo]:
+def find_window_by_title(
+    substring: str,
+    *,
+    display: str | None = None,
+) -> Optional[WindowInfo]:
     """Find the first visible window whose title contains *substring*."""
     lower = substring.lower()
-    for win in list_windows():
+    for win in list_windows(display=display):
         if lower in win.title.lower():
             return win
     return None
 
 
-def find_window_by_handle(window_id: int) -> Optional[WindowInfo]:
+def find_window_by_handle(
+    window_id: int,
+    *,
+    display: str | None = None,
+) -> Optional[WindowInfo]:
     """Return window info for a specific CGWindowID."""
-    for win in list_windows(include_hidden=True):
+    for win in list_windows(include_hidden=True, display=display):
         if win.handle == window_id:
             return win
     return None

@@ -39,8 +39,9 @@ class MonitorInfo:
         }
 
 
-def list_monitors() -> list[MonitorInfo]:
+def list_monitors(*, display: str | None = None) -> list[MonitorInfo]:
     """Enumerate connected monitors using the Win32 *EnumDisplayMonitors* API."""
+    _ = display
     user32 = ctypes.windll.user32
 
     monitors: list[MonitorInfo] = []
@@ -110,11 +111,16 @@ class WindowInfo:
         }
 
 
-def list_windows(*, include_hidden: bool = False) -> list[WindowInfo]:
+def list_windows(
+    *,
+    include_hidden: bool = False,
+    display: str | None = None,
+) -> list[WindowInfo]:
     """Enumerate top-level windows.
 
     By default only visible windows with a non-empty title are returned.
     """
+    _ = display
     user32 = ctypes.windll.user32
 
     windows: list[WindowInfo] = []
@@ -159,17 +165,26 @@ def list_windows(*, include_hidden: bool = False) -> list[WindowInfo]:
     return windows
 
 
-def find_window_by_title(substring: str) -> Optional[WindowInfo]:
+def find_window_by_title(
+    substring: str,
+    *,
+    display: str | None = None,
+) -> Optional[WindowInfo]:
     """Find the first visible window whose title contains *substring*."""
     lower = substring.lower()
-    for win in list_windows():
+    for win in list_windows(display=display):
         if lower in win.title.lower():
             return win
     return None
 
 
-def find_window_by_handle(hwnd: int) -> Optional[WindowInfo]:
+def find_window_by_handle(
+    hwnd: int,
+    *,
+    display: str | None = None,
+) -> Optional[WindowInfo]:
     """Return window info for a specific HWND, or ``None``."""
+    _ = display
     user32 = ctypes.windll.user32
     if not user32.IsWindow(hwnd):
         return None

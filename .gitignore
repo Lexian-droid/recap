@@ -10,3 +10,4 @@ build/
 # Recording test output
 recording.mp4
 quick-test.mp4
+.recap_temp_**.*

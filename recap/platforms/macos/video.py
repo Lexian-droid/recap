@@ -200,6 +200,7 @@ class VideoCapture:
         self._width: int = 0
         self._height: int = 0
         self._ready_event = threading.Event()
+        self._started_at: Optional[float] = None
 
     @staticmethod
     def measure_achievable_fps(
@@ -250,11 +251,16 @@ class VideoCapture:
     def height(self) -> int:
         return self._height
 
+    @property
+    def started_at(self) -> Optional[float]:
+        return self._started_at
+
     def start(self) -> None:
         if self._running:
             return
         self._stop_event.clear()
         self._ready_event.clear()
+        self._started_at = None
         self._thread = threading.Thread(
             target=self._capture_loop, daemon=True, name="recap-video",
         )
@@ -334,6 +340,9 @@ class VideoCapture:
             except (BrokenPipeError, OSError):
                 break
 
+            if self._started_at is None:
+                self._started_at = time.perf_counter()
+
             now = time.perf_counter()
             if next_frame is None:
                 next_frame = now
@@ -397,6 +406,9 @@ class VideoCapture:
                 self._stream.write(data)
             except (BrokenPipeError, OSError):
                 break
+
+            if self._started_at is None:
+                self._started_at = time.perf_counter()
 
             now = time.perf_counter()
             if next_frame is None:

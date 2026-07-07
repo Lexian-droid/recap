@@ -483,10 +483,15 @@ class Recorder:
             a_started = getattr(self._audio_capture, "started_at", None)
             v_started = getattr(self._video_capture, "started_at", None)
             if isinstance(a_started, float) and isinstance(v_started, float):
-                # Positive value means audio timeline starts later than video.
-                self._av_start_offset = a_started - v_started
+                # Audio capture is started first (see above), so its first
+                # real samples normally precede the first video frame.
+                # Positive value means video's first frame lags behind the
+                # first audio sample by this many seconds; that much needs
+                # to be trimmed off the *start* of the audio so frame 0
+                # lines up with the matching audio sample.
+                self._av_start_offset = v_started - a_started
                 log.info(
-                    "Measured A/V start offset: audio-video = %.3fs",
+                    "Measured A/V start offset: video-audio = %.3fs",
                     self._av_start_offset,
                 )
             else:
@@ -506,9 +511,10 @@ class Recorder:
         ffmpeg = str(self._ffmpeg_info.path)
         ow = "-y" if self._config.overwrite else "-n"
 
-        # Compensate delayed-audio starts seen on some Linux pulse setups.
-        # If audio started later than video by a measurable margin, trim that
-        # leading offset from the captured WAV during mux.
+        # Audio capture is started before video, so the WAV file usually
+        # contains a lead-in of extra audio recorded before the first video
+        # frame. Trim that lead-in so audio sample 0 lines up with video
+        # frame 0.
         audio_trim = 0.0
         if isinstance(self._av_start_offset, float) and self._av_start_offset > 0.05:
             audio_trim = self._av_start_offset

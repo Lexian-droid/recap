@@ -582,18 +582,16 @@ class Recorder:
             )
 
     def _cleanup_temp_files(self, *, keep_on_failure: bool = False) -> None:
-        """Remove temporary video and audio files."""
-        if keep_on_failure:
-            for p in (self._temp_video_path, self._temp_audio_path):
-                if p is not None and p.exists():
-                    log.debug("Keeping temp file for debugging: %s", p)
-            return
+        """Remove temporary video and audio files.
+
+        NOTE: Deletion is temporarily disabled so the intermediate
+        ``.recap_temp_*_video.mp4`` / ``.recap_temp_*_audio.wav`` files are
+        left on disk for A/V sync debugging. Re-enable the unlink calls
+        below once the drift investigation is complete.
+        """
         for p in (self._temp_video_path, self._temp_audio_path):
-            if p is not None:
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            if p is not None and p.exists():
+                log.info("Keeping temp file for debugging: %s", p)
 
 
 # ====================================================================

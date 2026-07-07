@@ -383,6 +383,28 @@ class Recorder:
                     output.parent / f".recap_temp_{os.getpid()}_audio.wav"
                 )
 
+        # ── start audio capture first in A/V mode ──────────────────
+        # This avoids recording pre-roll video frames before Linux audio
+        # loopback actually begins delivering samples.
+        if self._has_audio:
+            from recap.audio import AudioCapture
+
+            audio_path = (
+                str(self._temp_audio_path)
+                if self._temp_audio_path is not None
+                else str(self._config.output)
+            )
+            self._audio_capture = AudioCapture(
+                audio_path,
+                process_id=_window_pid,
+                ffmpeg_path=str(self._ffmpeg_info.path) if self._ffmpeg_info else None,
+            )
+            self._audio_capture.start()
+            if not self._audio_capture.wait_format_ready(timeout=10):
+                raise CaptureError("Audio capture did not become ready.")
+            if not self._audio_capture.wait_started(timeout=10):
+                raise CaptureError("Audio capture did not start in time.")
+
         # ── start video capture + encoding FFmpeg ───────────────────
         if self._has_video:
             self._video_relay = _VideoRelay()
@@ -455,26 +477,6 @@ class Recorder:
             # can write frames as soon as it's ready.
             self._video_relay.set_target(self._ffmpeg_proc.stdin)
 
-        # ── start audio capture (WAV file) ──────────────────────────
-        if self._has_audio:
-            from recap.audio import AudioCapture
-
-            audio_path = (
-                str(self._temp_audio_path)
-                if self._temp_audio_path is not None
-                else str(self._config.output)
-            )
-            self._audio_capture = AudioCapture(
-                audio_path,
-                process_id=_window_pid,
-                ffmpeg_path=str(self._ffmpeg_info.path) if self._ffmpeg_info else None,
-            )
-            self._audio_capture.start()
-            if not self._audio_capture.wait_format_ready(timeout=10):
-                raise CaptureError("Audio capture did not become ready.")
-            if not self._audio_capture.wait_started(timeout=10):
-                raise CaptureError("Audio capture did not start in time.")
-
         # ── optional duration cap ───────────────────────────────────
         if self._config.duration is not None:
             self._duration_timer = threading.Timer(
@@ -503,7 +505,9 @@ class Recorder:
             # Keep fixed-duration recordings stable even if audio starts late.
             cmd += ["-af", "apad", "-t", str(self._config.duration)]
         else:
-            cmd += ["-shortest"]
+            # Prefer full video span in manual-stop recordings and pad audio
+            # when it started slightly later.
+            cmd += ["-af", "apad", "-shortest"]
 
         cmd.append(str(self._config.output))
         log.debug("FFmpeg mux command: %s", cmd)

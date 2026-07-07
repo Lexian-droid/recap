@@ -457,11 +457,19 @@ class Recorder:
             ffmpeg, ow,
             "-i", str(self._temp_video_path),
             "-i", str(self._temp_audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
-            str(self._config.output),
         ]
+
+        if self._config.duration is not None:
+            # Keep fixed-duration recordings stable even if audio starts late.
+            cmd += ["-af", "apad", "-t", str(self._config.duration)]
+        else:
+            cmd += ["-shortest"]
+
+        cmd.append(str(self._config.output))
         log.debug("FFmpeg mux command: %s", cmd)
         log.info("Muxing audio and video...")
         result = subprocess.run(

@@ -201,6 +201,74 @@ def _ximage_to_bgra(image_p: ctypes.POINTER, width: int, height: int) -> bytes:
     )
 
 
+def _get_window_capture_region(
+    x11,
+    display: ctypes.c_void_p,
+    window_id: int,
+) -> tuple[int, int, int, int]:
+    """Resolve a safe root-window capture rectangle for a target window.
+
+    Some X11 window types can fail XGetImage(window, ...) with BadMatch.
+    Capturing the translated root-window region is more robust.
+    """
+    root_ret = ctypes.c_ulong()
+    x_ret = ctypes.c_int()
+    y_ret = ctypes.c_int()
+    w_ret = ctypes.c_uint()
+    h_ret = ctypes.c_uint()
+    bw_ret = ctypes.c_uint()
+    d_ret = ctypes.c_uint()
+
+    status = x11.XGetGeometry(
+        display, window_id,
+        ctypes.byref(root_ret),
+        ctypes.byref(x_ret), ctypes.byref(y_ret),
+        ctypes.byref(w_ret), ctypes.byref(h_ret),
+        ctypes.byref(bw_ret), ctypes.byref(d_ret),
+    )
+    if not status:
+        raise VideoCaptureError(f"Window {window_id:#x} not found or invalid.")
+
+    if w_ret.value <= 0 or h_ret.value <= 0:
+        raise VideoCaptureError(
+            f"Window has no client area ({w_ret.value}x{h_ret.value}). "
+            "It may be minimised."
+        )
+
+    root_x = ctypes.c_int()
+    root_y = ctypes.c_int()
+    child_ret = ctypes.c_ulong()
+    root = x11.XDefaultRootWindow(display)
+    x11.XTranslateCoordinates(
+        display,
+        window_id,
+        root,
+        0,
+        0,
+        ctypes.byref(root_x),
+        ctypes.byref(root_y),
+        ctypes.byref(child_ret),
+    )
+
+    screen = x11.XDefaultScreen(display)
+    root_w = x11.XDisplayWidth(display, screen)
+    root_h = x11.XDisplayHeight(display, screen)
+
+    left = max(root_x.value, 0)
+    top = max(root_y.value, 0)
+    right = min(root_x.value + int(w_ret.value), root_w)
+    bottom = min(root_y.value + int(h_ret.value), root_h)
+
+    cap_w = right - left
+    cap_h = bottom - top
+    if cap_w <= 0 or cap_h <= 0:
+        raise VideoCaptureError(
+            "Target window is outside the visible X11 root region."
+        )
+
+    return left, top, cap_w, cap_h
+
+
 # =========================================================================
 # VideoCapture
 # =========================================================================
@@ -244,34 +312,48 @@ class VideoCapture:
             try:
                 root = x11.XDefaultRootWindow(display)
 
+                cap_x = 0
+                cap_y = 0
+                drawable = root
                 if window_handle is not None:
-                    drawable = window_handle
+                    cap_x, cap_y, cap_w, cap_h = _get_window_capture_region(
+                        x11, display, window_handle,
+                    )
                 else:
-                    drawable = root
+                    cap_w = 0
+                    cap_h = 0
 
                 # Determine capture region
-                root_ret = ctypes.c_ulong()
-                x_ret = ctypes.c_int()
-                y_ret = ctypes.c_int()
-                w_ret = ctypes.c_uint()
-                h_ret = ctypes.c_uint()
-                bw_ret = ctypes.c_uint()
-                d_ret = ctypes.c_uint()
-                x11.XGetGeometry(
-                    display, drawable,
-                    ctypes.byref(root_ret),
-                    ctypes.byref(x_ret), ctypes.byref(y_ret),
-                    ctypes.byref(w_ret), ctypes.byref(h_ret),
-                    ctypes.byref(bw_ret), ctypes.byref(d_ret),
-                )
-                w, h = w_ret.value, h_ret.value
+                if window_handle is None:
+                    root_ret = ctypes.c_ulong()
+                    x_ret = ctypes.c_int()
+                    y_ret = ctypes.c_int()
+                    w_ret = ctypes.c_uint()
+                    h_ret = ctypes.c_uint()
+                    bw_ret = ctypes.c_uint()
+                    d_ret = ctypes.c_uint()
+                    x11.XGetGeometry(
+                        display, drawable,
+                        ctypes.byref(root_ret),
+                        ctypes.byref(x_ret), ctypes.byref(y_ret),
+                        ctypes.byref(w_ret), ctypes.byref(h_ret),
+                        ctypes.byref(bw_ret), ctypes.byref(d_ret),
+                    )
+                    w, h = w_ret.value, h_ret.value
+                else:
+                    w, h = cap_w, cap_h
                 if w == 0 or h == 0:
                     return target_fps
 
                 timings: list[float] = []
                 for _ in range(15):
                     t0 = time.perf_counter()
-                    img = x11.XGetImage(display, drawable, 0, 0, w, h, AllPlanes, ZPixmap)
+                    img = x11.XGetImage(
+                        display, drawable,
+                        cap_x if window_handle is not None else 0,
+                        cap_y if window_handle is not None else 0,
+                        w, h, AllPlanes, ZPixmap,
+                    )
                     t1 = time.perf_counter()
                     if img:
                         x11.XDestroyImage(img)
@@ -399,39 +481,16 @@ class VideoCapture:
             raise VideoCaptureError("Cannot open X display.")
 
         try:
-            # Get window geometry
-            root_ret = ctypes.c_ulong()
-            x_ret = ctypes.c_int()
-            y_ret = ctypes.c_int()
-            w_ret = ctypes.c_uint()
-            h_ret = ctypes.c_uint()
-            bw_ret = ctypes.c_uint()
-            d_ret = ctypes.c_uint()
-
-            status = x11.XGetGeometry(
-                display, window_id,
-                ctypes.byref(root_ret),
-                ctypes.byref(x_ret), ctypes.byref(y_ret),
-                ctypes.byref(w_ret), ctypes.byref(h_ret),
-                ctypes.byref(bw_ret), ctypes.byref(d_ret),
+            cap_x, cap_y, cap_w, cap_h = _get_window_capture_region(
+                x11, display, window_id,
             )
-            if not status:
-                raise VideoCaptureError(
-                    f"Window {window_id:#x} not found or invalid."
-                )
-
-            self._width = w_ret.value
-            self._height = h_ret.value
-
-            if self._width <= 0 or self._height <= 0:
-                raise VideoCaptureError(
-                    f"Window has no client area ({self._width}x{self._height}). "
-                    "It may be minimised."
-                )
+            self._width = cap_w
+            self._height = cap_h
+            root = x11.XDefaultRootWindow(display)
 
             log.info(
-                "Window capture (X11): ID=%#x %dx%d",
-                window_id, self._width, self._height,
+                "Window capture (X11 root-region): ID=%#x %dx%d @ (%d,%d)",
+                window_id, self._width, self._height, cap_x, cap_y,
             )
             self._ready_event.set()
 
@@ -444,8 +503,8 @@ class VideoCapture:
 
             while not self._stop_event.is_set():
                 image_p = x11.XGetImage(
-                    display, window_id,
-                    0, 0,
+                    display, root,
+                    cap_x, cap_y,
                     self._width, self._height,
                     AllPlanes, ZPixmap,
                 )

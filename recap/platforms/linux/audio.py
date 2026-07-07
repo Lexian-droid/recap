@@ -166,9 +166,35 @@ class AudioCapture:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+        # Treat "started" as "first samples written" so fixed-duration
+        # recordings are timed from actual audio data, not process spawn.
+        wav_path = Path(self._wav_path)
+        start_deadline = time.perf_counter() + 10.0
+        saw_audio_data = False
+        while not self._stop_event.is_set():
+            if self._ffmpeg_proc.poll() is not None:
+                raise AudioCaptureError(
+                    "FFmpeg audio capture exited before producing audio data."
+                )
+            try:
+                if wav_path.exists() and wav_path.stat().st_size > 44:
+                    saw_audio_data = True
+                    break
+            except OSError:
+                pass
+            if time.perf_counter() >= start_deadline:
+                break
+            time.sleep(0.02)
+
         self._started_at = time.perf_counter()
         self._started_event.set()
-        log.info("Linux audio capture started")
+        if saw_audio_data:
+            log.info("Linux audio capture started (first audio samples detected)")
+        else:
+            log.warning(
+                "Linux audio capture start confirmation timed out; continuing."
+            )
 
         # Wait for stop signal
         self._stop_event.wait()
